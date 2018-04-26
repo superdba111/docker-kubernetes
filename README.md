@@ -1,4 +1,5 @@
 # docker
+# for leetcode SQL ---https://github.com/superdba111/Tableau-Maestro-PythonDash/blob/master/SQL/sql
 # using the following for run this sample template docker
 docker pull maxwelllee/myhello
 #docker-compose up --build (if you want to build it manually)
@@ -22,3 +23,5 @@ f18e1bfbaea1        myhello                                    "/bin/sh -c 'guni
 
 then go to 
 http://localhost:8000/
+
+
