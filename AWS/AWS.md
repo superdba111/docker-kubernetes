@@ -1,2 +1,2 @@
-#SQL is Fundamentals of DSE and any IT/Business People; you are welcome to use my docker for your leetcode sql handson practices
-docker pull maxwelllee/mysql
+#AWS is very popular and easy to use, I know this is NOT chanllenge for smart people but here is my note for you to get your certificate
+AWS Overview---https://drive.google.com/file/d/1aTTbUn5thNfUQGz5ubafusAQAoSm7Cei/view?usp=sharing
