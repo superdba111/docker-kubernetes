@@ -3,3 +3,5 @@
 AWS Overview---https://drive.google.com/file/d/1aTTbUn5thNfUQGz5ubafusAQAoSm7Cei/view?usp=sharing
 
 IAM--https://drive.google.com/open?id=1BGjX7XLiiJEk8SpmvNZJSyvGJKKvji9z
+
+S3---https://drive.google.com/open?id=1CeMJlysuZP_E7q_vltdg0QqCnCPRUJ0f
