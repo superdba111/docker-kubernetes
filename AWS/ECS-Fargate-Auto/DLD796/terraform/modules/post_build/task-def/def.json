@@ -1,0 +1,55 @@
+[
+  {
+    "name": "${definition_name}",
+    "image": "${image_tag}",
+    "essential": true,
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "Options": {
+        "awslogs-region": "${region}",
+        "awslogs-group": "${log_group}",
+        "awslogs-stream-prefix": "${definition_name}"
+      }
+    },
+    "portMappings"     : [
+      {
+        "containerPort" : 80,
+        "hostPort"      : 80
+      }
+    ],
+    "environment": [
+      {
+        "name": "DD_ENV",
+        "value": "${datadog_secret}"
+      },
+      {
+        "name": "DD_SERVICE",
+        "value": "true" 
+      }
+    ]
+  },
+  {
+    "name": "datadog-agent",
+    "image": "public.ecr.aws/datadog/agent:latest",
+    "memoryReservation": 256,
+    "essential": true,
+    "environment": [
+      {
+        "name": "DD_API_KEY",
+        "value": "${datadog_secret}"
+      },
+      {
+        "name": "ECS_FARGATE",
+        "value": "true"
+      },
+      {
+        "name": "DD_DOGSTATSD_NON_LOCAL_TRAFFIC",
+        "value": "true"
+      },
+      {
+        "name": "DD_APM_ENABLED",
+        "value": "true"
+      }
+    ]
+  }
+]
