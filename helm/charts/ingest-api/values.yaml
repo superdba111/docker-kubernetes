@@ -1,0 +1,40 @@
+replicaCount: 3
+
+image:
+  repository: 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/foundry/ingest-api
+  # Immutable tag set by CI (git SHA). Never "latest".
+  tag: ""
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  name: ingest-api
+  roleArn: ""
+
+env:
+  AWS_REGION: us-gov-west-1
+  AWS_USE_FIPS_ENDPOINT: "true"
+  RAW_BUCKET: foundry-govhigh-raw-ingest
+  LOG_LEVEL: INFO
+  SENTRY_ENVIRONMENT: govhigh
+
+# Pulled from AWS Secrets Manager by External Secrets Operator.
+externalSecret:
+  secretStoreRef: govhigh-secrets-manager
+  refreshInterval: 1h
+  keys:
+    SENTRY_DSN: govhigh/ingest-api/sentry-dsn   # self-hosted, sentry.govhigh.internal
+    DB_PASSWORD: govhigh/ingest-api/db-password
+
+database:
+  host: ingest.cluster-xxxx.us-gov-west-1.rds.amazonaws.com
+  name: ingest
+  user: ingest_api
+
+resources:
+  requests: { cpu: 250m, memory: 256Mi }
+  limits:   { memory: 512Mi }
+
+networkPolicy:
+  ingressFromNamespaces: [ingress-nginx]
+  egressCidrs: []        # AWS APIs via VPC endpoints (covered by platform-egress policy)
+  egressToNamespaces: [sentry]
