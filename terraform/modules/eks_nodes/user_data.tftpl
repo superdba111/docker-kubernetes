@@ -1,0 +1,3 @@
+#!/bin/bash
+set -ex
+/etc/eks/bootstrap.sh ${cluster_name} --b64-cluster-ca ${cluster_certificate} --apiserver-endpoint ${api_server_url}
