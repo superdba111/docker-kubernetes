@@ -1,0 +1,9 @@
+serviceAccount:
+  roleArn: arn:aws-us-gov:iam::111122223333:role/govhigh-export-service
+
+env:
+  EXPORT_QUEUE_URL: https://sqs.us-gov-west-1.amazonaws.com/111122223333/govhigh-export-jobs
+
+database:
+  host: exports.cluster-xxxx.us-gov-west-1.rds.amazonaws.com
+  password: "Xp0rt-svc!2026-govhigh"

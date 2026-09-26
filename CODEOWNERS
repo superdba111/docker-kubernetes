@@ -10,3 +10,8 @@
 **/Dockerfile             @foundry/platform @foundry/security-review
 
 /services/ingest-api/     @foundry/ingest @foundry/platform
+
+# Data Products — export feature
+/services/export-service/                  @foundry/data-products
+/helm/charts/export-service/               @foundry/data-products
+/.github/workflows/export-service.yml      @foundry/data-products

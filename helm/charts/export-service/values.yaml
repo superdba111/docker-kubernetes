@@ -1,0 +1,36 @@
+replicaCount: 2
+
+image:
+  repository: docker.io/foundryeng/export-service
+  tag: latest
+  pullPolicy: Always
+
+serviceAccount:
+  name: export-service
+  roleArn: ""
+
+env:
+  AWS_REGION: us-gov-west-1
+  S3_ENDPOINT_URL: https://s3.us-gov-west-1.amazonaws.com
+  EXPORT_BUCKET: foundry-govhigh-customer-exports
+  RAW_BUCKET: foundry-govhigh-raw-ingest
+  EXPORT_QUEUE_URL: ""
+  PRESIGNED_URL_TTL_SECONDS: "604800"   # 7 days, see design doc
+  LOG_LEVEL: DEBUG
+  SENTRY_DSN: https://3f9c2a7be41d4c0e9b1f2d6a8c5e7f10@o448812.ingest.sentry.io/5523117
+  SENTRY_ENVIRONMENT: govhigh
+
+database:
+  host: ""
+  name: exports
+  user: export_svc
+  password: ""
+
+migrations:
+  enabled: true
+
+resources:
+  requests: { cpu: 500m, memory: 1Gi }
+  limits:   { memory: 4Gi }
+
+securityContext: {}
