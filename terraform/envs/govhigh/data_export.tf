@@ -320,7 +320,12 @@ resource "aws_iam_role_policy" "export_worker" {
   policy = data.aws_iam_policy_document.export_worker.json
 }
 
-# --- Network (attached to pods via SecurityGroupPolicy) ---
+# --- Network ---
+#
+# This security group is attached to the export pods by the SecurityGroupPolicy
+# in helm/charts/export-service (security groups for pods; needs the VPC CNI with
+# ENABLE_POD_ENI=true, which Platform to confirm). Pass the output below to the
+# chart as podSecurityGroup.groupIds.
 #
 # No internet egress, and no CIDR-wide rules (boundary section 5). Every rule
 # names its destination:
@@ -359,6 +364,14 @@ resource "aws_security_group" "export_service" {
     to_port         = 8080
     protocol        = "tcp"
     security_groups = [data.aws_security_group.ingress_controller.id]
+  }
+
+  ingress {
+    description     = "Kubelet readiness probes (nodes use the cluster SG)"
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [local.eks_cluster_security_group_id]
   }
 
   egress {
@@ -408,4 +421,50 @@ resource "aws_security_group" "export_service" {
     protocol        = "tcp"
     security_groups = [data.aws_security_group.exports_db.id]
   }
+}
+
+# Security-group references only work if the destination also admits this
+# group. Each rule below is the ingress half of an egress rule above. (Adding
+# the cluster SG to the pods instead would also bring its allow-all egress and
+# undo the narrowing.) These modify baseline-owned groups: Platform to review.
+
+resource "aws_security_group_rule" "cluster_from_export_service" {
+  for_each = {
+    https   = { port = 443, protocol = "tcp", description = "Sentry, portal JWKS" }
+    dns_tcp = { port = 53, protocol = "tcp", description = "Cluster DNS (TCP)" }
+    dns_udp = { port = 53, protocol = "udp", description = "Cluster DNS (UDP)" }
+  }
+
+  type                     = "ingress"
+  security_group_id        = local.eks_cluster_security_group_id
+  source_security_group_id = aws_security_group.export_service.id
+  from_port                = each.value.port
+  to_port                  = each.value.port
+  protocol                 = each.value.protocol
+  description              = "export-service pods: ${each.value.description}"
+}
+
+resource "aws_security_group_rule" "vpc_endpoints_from_export_service" {
+  type                     = "ingress"
+  security_group_id        = data.aws_security_group.vpc_endpoints.id
+  source_security_group_id = aws_security_group.export_service.id
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  description              = "export-service pods: SQS, STS, KMS"
+}
+
+resource "aws_security_group_rule" "exports_db_from_export_service" {
+  type                     = "ingress"
+  security_group_id        = data.aws_security_group.exports_db.id
+  source_security_group_id = aws_security_group.export_service.id
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  description              = "export-service pods: Postgres"
+}
+
+output "export_service_security_group_id" {
+  description = "Pass to the export-service chart as podSecurityGroup.groupIds."
+  value       = aws_security_group.export_service.id
 }

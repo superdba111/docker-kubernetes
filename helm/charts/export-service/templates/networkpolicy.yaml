@@ -44,3 +44,25 @@ spec:
   ingress: []
   egress:
     {{- include "export-service.egress" . | nindent 4 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-migrate
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: export-service
+      app.kubernetes.io/component: migrate
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- with .Values.networkPolicy.egressCidrs }}
+    - to:
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - port: 5432
+    {{- end }}

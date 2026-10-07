@@ -1,0 +1,21 @@
+{{- /*
+Attaches the Terraform-managed export-service security group to the api and
+worker pods (security groups for pods). Without this the SG's narrow egress
+rules govern nothing. Exports can't be enabled for any tenant until it's set.
+*/ -}}
+{{- if and .Values.exports.enabledTenants (not .Values.podSecurityGroup.groupIds) }}
+{{- fail "podSecurityGroup.groupIds is required before enabling exports for any tenant (Terraform output export_service_security_group_id)" }}
+{{- end }}
+{{- with .Values.podSecurityGroup.groupIds }}
+apiVersion: vpcresources.k8s.aws/v1beta1
+kind: SecurityGroupPolicy
+metadata:
+  name: {{ $.Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: export-service
+  securityGroups:
+    groupIds:
+      {{- toYaml . | nindent 6 }}
+{{- end }}

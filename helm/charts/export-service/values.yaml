@@ -84,6 +84,11 @@ containerSecurityContext:
   capabilities:
     drop: ["ALL"]
 
+# Security group for the export pods (Terraform output
+# export_service_security_group_id). Required before any tenant is enabled.
+podSecurityGroup:
+  groupIds: []
+
 networkPolicy:
   ingressFromNamespaces: [ingress-nginx]
   egressToNamespaces: [sentry]         # both components: in-boundary error tracking
