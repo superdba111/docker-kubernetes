@@ -4,8 +4,8 @@ Reviewer: @foundry/security-review (Maxwell Li) · Reviewed at PR head `fcbf06d`
 Rules applied: `docs/authorization-boundary.md`, `docs/security-review-policy.md`.
 Pattern baseline: `ingest-api` (SR-2026-031).
 
-**Outcome: Changes requested.** 4 × Blocker (boundary), 14 × Blocker, 10 × Pre-prod,
-4 × Follow-up, 2 × Nit, 9 × No action. See `decision.md` for what can ship Friday.
+**Outcome: Changes requested.** 4 × Blocker (boundary), 15 × Blocker, 10 × Pre-prod,
+5 × Follow-up, 2 × Nit, 9 × No action. See `decision.md` for what can ship Friday.
 
 Line numbers refer to the PR head (`fcbf06d`), not to my fix commit.
 
@@ -60,7 +60,7 @@ at `sentry.govhigh.internal` as `ingest-api` does. Set `send_default_pii=False`
 and a low trace sample rate. Upgrade `sentry-sdk` (see scan triage).
 
 ### A3. `values.yaml:3-6`, `.github/workflows/export-service.yml:25-42`, `Dockerfile`: images built and served from Docker Hub
-**Blocker (boundary)** · *partly fixed in this branch: CI pushes to ECR; base image still `python:3.12-slim` (F1, Platform)*
+**Blocker (boundary)** · *fixed in this branch* (CI pushes to ECR; image built on the hardened base, F1)
 
 The govhigh cluster would pull its runtime image from `docker.io/foundryeng`,
 built by a GitHub-hosted runner. The only allowed registry is ECR in
@@ -245,6 +245,29 @@ doesn't help:
   have each tenant read config from the export DB and drop the ConfigMaps.
   Any ClusterRole needs Security Review (§4).
 
+### C5. `.github/workflows/export-service.yml`: untrusted PR code on the govhigh runner, with `id-token: write`
+**Pre-prod** · *fixed in this branch* · found in second-pass review
+
+Even after C1, my first rewrite (copying `ingest-api.yml`) ran PR code on the
+`govhigh-builder` self-hosted runner in a job granted `id-token: write`. PR code
+then ran on infrastructure inside the boundary, next to whatever ambient
+credentials or cached images the runner has. It could request an OIDC token;
+only the role's trust policy stood between it and AWS.
+
+**Fix (done):**
+- **`test` job:** unit tests only, on an ephemeral GitHub-hosted runner with
+  `contents: read`. Public code only, no secrets, no CUI.
+- **`publish` job:** runs only on push to `main`. It's the only job on the
+  govhigh runner, and the only one with `id-token: write`. It logs in to ECR
+  with OIDC before building, so pulling the base image doesn't rely on ambient
+  runner credentials.
+- **Trade-off:** PRs no longer build or scan the image, because the hardened
+  base is in private ECR. The scan still gates every image before it reaches
+  ECR.
+- **Follow-up for Platform:** confirm `govhigh-builder` runners are ephemeral
+  and have no instance-profile credentials. **`ingest-api.yml` has the same
+  pattern.**
+
 ---
 
 ## D. Blocker: export bucket (`data_export.tf:9-60`)
@@ -315,7 +338,7 @@ data. Boundary §4 requires both pinned. **Instead:** `StringEquals` `:aud` =
   (`aws_s3_bucket.exports.arn`, `aws_s3_bucket.raw_ingest.arn`).
 
 ### E3. `:229-235`: SG egress `0.0.0.0/0:443` ("S3, SQS, Sentry")
-**Pre-prod**
+**Blocker** · *fixed in this branch* (raised from Pre-prod in second-pass review: §5 says NAT egress must be allow-listed, and there's no exception for it)
 
 Boundary §5 says AWS services go through VPC endpoints and NAT egress is
 allow-listed. Once A2 is fixed, nothing legitimate needs the internet. Restrict
@@ -357,7 +380,7 @@ can't fix that, and what will.
 
 | # | Where | Finding | Instead |
 |---|---|---|---|
-| F1 | `Dockerfile:1,7` | `python:3.12-slim` from Docker Hub, not the hardened FIPS image (boundary §3). This base also accounts for most of the OS findings in the scan | `…/hardened/python:3.12-fips`. For libpq 17, ask Platform to add it to the hardened image, or install from an in-boundary mirror |
+| F1 ✅ | `Dockerfile:1,7` | `python:3.12-slim` from Docker Hub, not the hardened FIPS image (boundary §3). This base also accounts for most of the OS findings in the scan | `…/hardened/python:3.12-fips`. **libpq 17 isn't needed:** I checked, and the app uses psycopg[binary]'s bundled libpq 16.1, so the PGDG packages were dead weight. Removed, along with the public apt repo (fetched over `http`) |
 | F2 ✅ | `values.yaml:14`, `main.py:28-32` | `S3_ENDPOINT_URL` overrides the endpoint with a **non-FIPS** URL, and `AWS_USE_FIPS_ENDPOINT` isn't set (boundary §3: "do not override endpoints with non-FIPS URLs") | Remove `S3_ENDPOINT_URL`; set `AWS_USE_FIPS_ENDPOINT: "true"`. The SQS `EXPORT_QUEUE_URL` is **not** a problem: I checked botocore 1.34, which sends SQS requests to the resolved client endpoint, not the QueueUrl host. In GovCloud the SQS FIPS endpoint *is* `sqs.us-gov-west-1.amazonaws.com` |
 | F3 ✅ | `values.yaml:36`, `deployment.yaml`, `Dockerfile` | Empty `securityContext`, no `USER`, so the pod runs as root with a writable root filesystem and all capabilities | Copy `ingest-api`: `runAsNonRoot`, `runAsUser: 10001`, seccomp `RuntimeDefault`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem`, drop ALL, `/tmp` emptyDir |
 | F4 ✅ | `values.yaml:4-6` | `tag: latest`, `pullPolicy: Always`, so you can't tell what's running and can't roll back | `tag: ""` + `required` in the template, set to the git SHA by CI; `IfNotPresent` |
@@ -386,6 +409,12 @@ can't fix that, and what will.
 - **G4. Audit logging:** the access log line should be an audit event (who,
   which tenant, which export, when, from where) sent to the in-boundary audit
   stream. It's fine as `log.info` for now.
+- **G6. psycopg[binary] bundles its own OpenSSL (platform-wide).** The
+  wheel ships `libpq`, `libssl` and `libcrypto` (verified locally), so DB TLS
+  doesn't use the hardened image's FIPS-validated OpenSSL. Boundary §3 requires
+  FIPS modules in transit. `ingest-api` passed review with the same pattern, so
+  I'm not blocking this PR on it, but Platform/Security should decide: build
+  `psycopg[c]` against the hardened image's libpq/OpenSSL, or document it.
 - **G5. Weak DLQ:** the DLQ has no alarm and uses default retention. Add a
   CloudWatch alarm on DLQ depth.
 
@@ -451,6 +480,9 @@ fixed in-repo, mostly by copying `ingest-api`. One commit per theme:
 | `a94ddf8` | A2, C2 | ExternalSecret for `DB_PASSWORD`/`SENTRY_DSN` (pre-install hook, so migrations can use it); plaintext password and sentry.io DSN removed; `send_default_pii=False`, no request bodies; sentry-sdk 2.19.2 |
 | `27d8e75` | C4, E4, F3–F5, F7 | Migrator has no K8s permissions (no cluster-admin, no token); pod/container hardening; NetworkPolicies; ECR image, required immutable tag; `LOG_LEVEL=INFO` |
 | `089a611` | C1, A3 (CI), C3, scan | `pull_request` + OIDC + govhigh runner + ECR, gating trivy, pinned actions; CODEOWNERS keeps Platform/Security; `USER 10001`; pyarrow 15.0.2, gunicorn 23.0.0, requests 2.32.3, responses/moto bumped |
+| `b63f93d` | F1, A3, E3 | Hardened FIPS base from ECR; PGDG repo, libpq 17, psql client, curl, gnupg removed (unused); SG egress limited to the S3 prefix list and VPC CIDR |
+| `8fb1c5a` | B4/G1 gate | Per-tenant feature flag (`exports.enabledTenants`), empty by default: API returns 404 and queues nothing, worker at 0 replicas, migration hook off |
+| `35e1fe1` | C5 | PR code tested on an ephemeral hosted runner with no OIDC; only main-branch publish uses the govhigh runner and `id-token: write` |
 
 **One behaviour change the author must confirm (C4).** The migrator no longer
 seeds `export-config` ConfigMaps into tenant namespaces. That was the only
@@ -461,7 +493,7 @@ reviewed by Security. Until then, the export service shouldn't depend on it.
 ### How to verify (no AWS account needed)
 ```
 pip install -r services/export-service/requirements-dev.txt
-pytest services/export-service                         # 14 passed
+pytest services/export-service                         # 16 passed
 helm lint helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml --set image.tag=x
 helm template t helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml   # fails: image.tag is required (intended)
 cd terraform/envs/govhigh
@@ -476,17 +508,20 @@ I also checked FIPS endpoint resolution with botocore 1.34 and
 deploy. Platform needs to do those before this goes anywhere near govhigh.
 
 ### Still open: the decision stays no-ship until these are done
+The feature now merges **disabled**, which is what the policy's Pre-prod label
+allows. Enabling it for any tenant still needs:
+
 | # | What | Why it's not in this branch | Owner |
 |---|---|---|---|
-| 1 | **B4 / G1: worker is all-tenant**, and the `worker` and `migrate` code isn't in the PR | Can't fix or review code that isn't here. Mechanism described in B4 | Data Products |
+| 1 | **B4 / G1: the worker is all-tenant, and the `worker`/`migrate` code isn't in the PR.** Gate: no tenant enabled until the worker is reviewed and uses per-job, tenant-scoped credentials | Can't fix or review code that isn't here. Mechanism described in B4 | Data Products |
 | 2 | **Revoke** `GOVHIGH_DEPLOY_AWS_*` and `DOCKERHUB_TOKEN`; check CloudTrail for fork-PR runs | Operational, today | Platform + Security |
-| 3 | **Rotate** the RDS password (it's in git history); populate `govhigh/export-service/db-password` and the in-boundary Sentry DSN | Operational | Data Products + Platform |
-| 4 | **F1: hardened FIPS base image** with libpq 17. The build still pulls `python:3.12-slim` from Docker Hub | Needs Platform's hardened image or an in-boundary mirror | Platform |
-| 5 | Create OIDC role `gha-ecr-push-export-service` (main-branch trust only) and ECR repo `foundry/export-service` | Needs Platform IAM | Platform |
-| 6 | `terraform plan`; confirm `exports` namespace default-deny; confirm JWKS URL / issuer | Needs environment access / portal team | Platform, portal team |
-| 7 | **A4:** ISSO confirms direct presigned S3 download is covered by the SSP | Compliance decision | ISSO |
-| 8 | E3 (SG egress `0.0.0.0/0`), F6 (hash pinning), scan Mediums/Lows | Lower priority; listed with exact changes | Data Products |
+| 3 | **Rotate** the RDS password (still in git history); populate `govhigh/export-service/db-password` and the in-boundary Sentry DSN | Operational | Data Products + Platform |
+| 4 | **A4:** ISSO confirms direct presigned S3 download is covered by the SSP. Until then, delivery goes through the portal | Compliance decision | ISSO |
+| 5 | OIDC role `gha-ecr-push-export-service` (main-branch trust), ECR repo `foundry/export-service`; confirm runner is ephemeral with no ambient creds (C5) | Needs Platform IAM | Platform |
+| 6 | `terraform plan`; confirm `exports` namespace default-deny; confirm JWKS URL/issuer; confirm `migrate` doesn't need `psql` (client removed) | Needs environment access / portal team / code not in PR | Platform, portal team, Data Products |
+| 7 | First image build and trivy rescan on the hardened base | Needs the pipeline from #5 | Platform |
+| 8 | F6 (hash pinning), G6 (bundled OpenSSL), scan Mediums/Lows | Lower priority; listed with exact changes | Data Products / Platform |
 
 ### What I'd do next, in order
-Items 2 and 3 today, then 1, then 4–6, then a rescan of the ECR image against
-the new-image gate.
+Items 2 and 3 today. Then 1, the real gate. Then 5–7, then 4 before enabling
+the launch tenant.

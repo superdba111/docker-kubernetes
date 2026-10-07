@@ -30,7 +30,12 @@ leaving the boundary, so taking the cross-boundary pieces out removes the
 - **Bucket:** private and KMS-encrypted.
 - **Identities:** separate least-privilege roles for the API and worker.
 - **Pods and secrets:** no cluster-admin; secrets from Secrets Manager.
-- **CI:** OIDC + ECR, with a scan gate that blocks.
+- **CI:** OIDC + ECR, with a scan gate that blocks; PR code never runs on
+  the govhigh runner.
+- **Image and network:** hardened FIPS base image, no public apt repos, no
+  internet egress.
+- **Feature flag:** per-tenant, **off by default**. With no tenant enabled,
+  the worker runs 0 replicas and migrations don't run.
 
 What's left before it can be enabled:
 
@@ -42,8 +47,8 @@ What's left before it can be enabled:
    review, no launch.** It's the one component that reads every tenant's data
    and runs pyarrow on it.
 3. **Platform (Wed):**
-   - **Pipeline:** OIDC push role and ECR repo.
-   - **Base image:** hardened FIPS image with libpq 17.
+   - **Pipeline:** OIDC push role and ECR repo; confirm the govhigh runner is
+     ephemeral with no ambient credentials.
    - **Terraform:** run `terraform plan`.
    - **Namespace:** confirm the `exports` namespace has default-deny.
    - **Rescan:** the scan gate must be clean (fixable Critical/High).
@@ -55,7 +60,8 @@ What's left before it can be enabled:
    Either way, the user gets a fresh link or stream per click, which also
    handles the weekend air-gap transfer.
 
-It ships behind a feature flag, **enabled for this one customer only**.
+It merges with the flag off. It's switched on for **this one customer's tenant
+only**, and only after items 1–4.
 
 **If that slips:** an operator runs a one-off export for this customer's tenant
 inside the boundary, and the customer collects it **through the portal**.
@@ -72,9 +78,9 @@ RBAC design).
 | Who | What | By |
 |---|---|---|
 | Platform + Security | Revoke CI credentials; CloudTrail check | Today |
-| Data Products (author) | Rotate DB password; worker + migrate code into the PR with B4; confirm nobody needs `export-config` ConfigMaps; update design doc | Tue EOD |
+| Data Products (author) | Rotate DB password; worker + migrate code into the PR with B4; confirm nobody needs `export-config` ConfigMaps and `migrate` doesn't need `psql`; update design doc | Tue EOD |
 | Data Products manager | Agree the reduced scope with the program office; choose plan vs. one-off by **Tue noon** | Tue noon |
-| Platform | OIDC role, ECR repo, hardened libpq 17 image, `terraform plan`, namespace default-deny, rescan | Wed |
+| Platform | OIDC role, ECR repo, runner isolation check, `terraform plan`, namespace default-deny, first build + rescan | Wed |
 | ISSO / compliance | Presigned S3 download covered by the SSP: yes/no (no means portal streaming) | Wed |
 | Security Review (me) | Same-day re-review of the worker and the final diff; co-sign RA-2026-014 | Wed–Thu |
 | Platform Eng Manager | Approve RA-2026-014; sponsor a boundary change record only if commercial DR is still wanted | Thu |

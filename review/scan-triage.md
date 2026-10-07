@@ -27,6 +27,13 @@ for the image as built.
 
 ## OS packages (debian 12.7)
 
+> **Update (commit `b63f93d`):** the image now builds on the hardened FIPS base
+> with **no apt installs**. `libpq5`, `postgresql-client-17`, `curl`/`libcurl4`
+> and `gnupg` are gone. The app uses psycopg[binary]'s bundled libpq instead, so
+> CVE-2026-90011/90034/90061 no longer apply to the image. The other OS rows
+> depend on what the hardened base contains; that's decided by the first rescan
+> in CI. The table below is the triage of the scan as delivered.
+
 | Package(s) | ID | Sev | Disposition | Reason |
 |---|---|---|---|---|
 | libpq5, postgresql-client-17 | CVE-2026-90011 | CRITICAL | **False positive** | 17.4 is installed, and the advisory says the bug is fixed upstream in 17.3. The scanner is comparing a PGDG 17.x package against Debian's `postgresql-15` fixed version (15.12). Exception RA-2026-014 below |
@@ -126,11 +133,16 @@ Not needed for an FP, but in place or required anyway:
   different libpq version or package is still reported.
 
 ### Remediation plan
-- **Closes when:** the scanner reports correctly, or the image moves to a
-  hardened FIPS base with libpq 17 provided by Platform. At that point the
-  finding should disappear, and the suppression is removed.
-- **Owner:** Platform (hardened image), Data Products (remove suppression).
-- **Revisit by:** 2027-01-04, or on any change to the `libpq5` version.
+- **Superseded by removal:** commit `b63f93d` removes the PGDG `libpq5` and
+  `postgresql-client-17` packages, since the app uses psycopg's bundled libpq.
+  Once the first hardened-base image passes the CI scan, this exception
+  **closes**, and no suppression is needed for the new image.
+- **Still needed:** the exception covers only the scanned artifact, and the
+  window until that rescan. If Data Products needs `psql` back (e.g. for
+  `migrate`), the package must come from an in-boundary mirror, and this
+  exception must be re-raised with fresh evidence.
+- **Owner:** Data Products (rescan + closure), Platform (hardened image).
+- **Revisit by:** first CI rescan, and no later than 2027-01-04.
 
 ### Approvals
 - Security Reviewer:
