@@ -15,7 +15,11 @@ env:
   EXPORT_BUCKET: foundry-govhigh-customer-exports
   RAW_BUCKET: foundry-govhigh-raw-ingest
   EXPORT_QUEUE_URL: ""
-  PRESIGNED_URL_TTL_SECONDS: "604800"   # 7 days, see design doc
+  PRESIGNED_URL_TTL_SECONDS: "900"     # 15 min; portal re-issues on each click. Capped at 1h in code.
+  # Session JWT verification (required; the service refuses to start without these)
+  JWT_ISSUER: ""
+  JWT_AUDIENCE: export-service
+  JWT_JWKS_URL: ""
   LOG_LEVEL: DEBUG
   SENTRY_DSN: https://3f9c2a7be41d4c0e9b1f2d6a8c5e7f10@o448812.ingest.sentry.io/5523117
   SENTRY_ENVIRONMENT: govhigh

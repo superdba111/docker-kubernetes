@@ -3,6 +3,9 @@ serviceAccount:
 
 env:
   EXPORT_QUEUE_URL: https://sqs.us-gov-west-1.amazonaws.com/111122223333/govhigh-export-jobs
+  # TODO(portal team): confirm issuer + in-boundary JWKS endpoint
+  JWT_ISSUER: https://portal.foundry-gov.example
+  JWT_JWKS_URL: https://portal.foundry-gov.example/.well-known/jwks.json
 
 database:
   host: exports.cluster-xxxx.us-gov-west-1.rds.amazonaws.com

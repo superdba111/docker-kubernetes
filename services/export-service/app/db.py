@@ -29,11 +29,13 @@ def insert_export(job: dict) -> None:
     _db().commit()
 
 
-def get_export(export_id: str) -> dict | None:
+def get_export(export_id: str, tenant_id: str) -> dict | None:
+    """Return the export only if it belongs to tenant_id."""
     with _db().cursor() as cur:
         cur.execute(
-            "SELECT id, tenant_id, status, s3_key FROM exports.jobs WHERE id = %s",
-            (export_id,),
+            "SELECT id, tenant_id, status, s3_key FROM exports.jobs "
+            "WHERE id = %s AND tenant_id = %s",
+            (export_id, tenant_id),
         )
         row = cur.fetchone()
     if row is None:

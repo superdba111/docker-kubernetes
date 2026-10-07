@@ -3,6 +3,7 @@
 POST /exports                 -> enqueue an export job for the caller's tenant
 GET  /exports/{export_id}/download -> presigned URL for a finished export
 """
+import datetime
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ import boto3
 import jwt
 import sentry_sdk
 from fastapi import Depends, FastAPI, Header, HTTPException
+from pydantic import BaseModel, model_validator
 
 from db import get_export, insert_export
 
@@ -34,16 +36,67 @@ sqs = boto3.client("sqs", region_name=os.environ["AWS_REGION"])
 
 BUCKET = os.environ["EXPORT_BUCKET"]
 QUEUE_URL = os.environ["EXPORT_QUEUE_URL"]
-TTL = int(os.environ.get("PRESIGNED_URL_TTL_SECONDS", "3600"))
+
+# Presigned URLs are bearer credentials. Keep them short-lived; the portal asks
+# for a fresh one each time the user clicks Download. (URLs signed with IRSA
+# session credentials stop working when the session expires anyway, so a
+# multi-day TTL was never going to hold.)
+MAX_TTL_SECONDS = 3600
+TTL = min(int(os.environ.get("PRESIGNED_URL_TTL_SECONDS", "900")), MAX_TTL_SECONDS)
+
+
+def _required_env(name: str) -> str:
+    value = os.environ.get(name, "")
+    if not value:
+        raise RuntimeError(f"{name} must be set")
+    return value
+
+
+# The portal's session JWTs are verified here, not only at the ingress: the
+# service must not trust claims from anything that can reach the pod.
+JWT_ISSUER = _required_env("JWT_ISSUER")
+JWT_AUDIENCE = _required_env("JWT_AUDIENCE")
+JWT_ALGORITHMS = ["RS256"]
+_jwks = jwt.PyJWKClient(_required_env("JWT_JWKS_URL"), cache_keys=True)
 
 app = FastAPI()
 
 
 def current_user(authorization: str = Header(...)) -> dict:
-    """The portal forwards the user's session JWT. Signature is verified by
-    the portal ingress, so we only need to read the claims here."""
-    token = authorization.removeprefix("Bearer ")
-    return jwt.decode(token, options={"verify_signature": False})
+    """Verify the portal session JWT and return its claims."""
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401)
+    try:
+        key = _jwks.get_signing_key_from_jwt(token).key
+        claims = jwt.decode(
+            token,
+            key,
+            algorithms=JWT_ALGORITHMS,
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER,
+            options={"require": ["exp", "iat", "iss", "aud", "sub", "tenant_id"]},
+        )
+    except jwt.PyJWKClientConnectionError:
+        log.exception("could not fetch JWKS")
+        raise HTTPException(status_code=503)
+    except jwt.PyJWTError as exc:
+        log.info("rejected token: %s", type(exc).__name__)
+        raise HTTPException(status_code=401)
+    if not isinstance(claims["tenant_id"], str) or not claims["tenant_id"]:
+        raise HTTPException(status_code=401)
+    return claims
+
+
+class ExportRequest(BaseModel):
+    start: datetime.date
+    end: datetime.date
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "ExportRequest":
+        if self.end < self.start:
+            raise ValueError("end must not be before start")
+        return self
 
 
 @app.get("/healthz")
@@ -52,13 +105,14 @@ def healthz() -> dict:
 
 
 @app.post("/exports")
-def create_export(body: dict, user: dict = Depends(current_user)) -> dict:
+def create_export(body: ExportRequest, user: dict = Depends(current_user)) -> dict:
     export_id = str(uuid.uuid4())
     job = {
         "export_id": export_id,
+        # Tenant always comes from the verified token, never from the body.
         "tenant_id": user["tenant_id"],
-        "start": body["start"],
-        "end": body["end"],
+        "start": body.start.isoformat(),
+        "end": body.end.isoformat(),
     }
     insert_export(job)
     sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=json.dumps(job))
@@ -67,8 +121,10 @@ def create_export(body: dict, user: dict = Depends(current_user)) -> dict:
 
 
 @app.get("/exports/{export_id}/download")
-def download(export_id: str, user: dict = Depends(current_user)) -> dict:
-    export = get_export(export_id)
+def download(export_id: uuid.UUID, user: dict = Depends(current_user)) -> dict:
+    # Scoped by tenant in the query. Another tenant's export looks exactly like
+    # a missing one (404), so export IDs can't be probed.
+    export = get_export(str(export_id), user["tenant_id"])
     if export is None or export["status"] != "done":
         raise HTTPException(status_code=404)
 
@@ -77,5 +133,9 @@ def download(export_id: str, user: dict = Depends(current_user)) -> dict:
         Params={"Bucket": BUCKET, "Key": export["s3_key"]},
         ExpiresIn=TTL,
     )
-    log.info("issued download url for %s: %s", export_id, url)
+    # Never log the URL itself: anyone holding it can download the export.
+    log.info(
+        "issued download url for export %s tenant %s sub %s ttl %ss",
+        export_id, user["tenant_id"], user["sub"], TTL,
+    )
     return {"url": url, "expires_in": TTL}
