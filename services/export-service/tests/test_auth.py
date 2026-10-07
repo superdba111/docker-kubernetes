@@ -64,7 +64,44 @@ def _download(client, token, export_id=EXPORT_A):
     )
 
 
-def test_owner_gets_short_lived_url(client):
+class _FakeBody:
+    def __init__(self, data):
+        self._data = data
+
+    def iter_chunks(self, size):
+        for i in range(0, len(self._data), size):
+            yield self._data[i:i + size]
+
+
+@pytest.fixture
+def fake_s3_object(monkeypatch):
+    fetched = []
+
+    def get_object(Bucket, Key):
+        fetched.append(Key)
+        return {"Body": _FakeBody(b"PAR1-data"), "ContentLength": 9}
+
+    monkeypatch.setattr(main.s3, "get_object", get_object)
+    return fetched
+
+
+def test_default_mode_streams_through_api(client, fake_s3_object):
+    assert main.DOWNLOAD_MODE == "stream"
+    resp = _download(client, _token())
+    assert resp.status_code == 200
+    assert resp.content == b"PAR1-data"
+    assert "attachment" in resp.headers["content-disposition"]
+    assert resp.headers["cache-control"] == "no-store"
+    assert fake_s3_object == ["tenant-a/x.parquet"]
+
+
+def test_stream_mode_other_tenant_gets_404_without_reading_s3(client, fake_s3_object):
+    assert _download(client, _token(tenant_id="tenant-b")).status_code == 404
+    assert fake_s3_object == []
+
+
+def test_presigned_mode_gives_short_lived_url(client, monkeypatch):
+    monkeypatch.setattr(main, "DOWNLOAD_MODE", "presigned")
     resp = _download(client, _token())
     assert resp.status_code == 200
     assert resp.json()["expires_in"] <= main.MAX_TTL_SECONDS
@@ -111,7 +148,8 @@ def test_non_uuid_export_id_rejected(client):
     assert _download(client, _token(), export_id="../../etc").status_code in (404, 422)
 
 
-def test_url_not_logged(client, caplog):
+def test_url_not_logged(client, caplog, monkeypatch):
+    monkeypatch.setattr(main, "DOWNLOAD_MODE", "presigned")
     caplog.set_level("INFO", logger="export-service")
     resp = _download(client, _token())
     assert resp.json()["url"] not in caplog.text

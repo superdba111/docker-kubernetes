@@ -1,7 +1,8 @@
 """export-service API.
 
 POST /exports                 -> enqueue an export job for the caller's tenant
-GET  /exports/{export_id}/download -> presigned URL for a finished export
+GET  /exports/{export_id}/download -> the finished export, streamed (default),
+                                      or a presigned URL when enabled
 """
 import datetime
 import json
@@ -13,6 +14,7 @@ import boto3
 import jwt
 import sentry_sdk
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, model_validator
 
 from db import get_export, insert_export
@@ -44,6 +46,15 @@ QUEUE_URL = os.environ["EXPORT_QUEUE_URL"]
 # multi-day TTL was never going to hold.)
 MAX_TTL_SECONDS = 3600
 TTL = min(int(os.environ.get("PRESIGNED_URL_TTL_SECONDS", "900")), MAX_TTL_SECONDS)
+
+# How exports reach the customer. "stream": the file is streamed through this
+# API and the portal, the only approved internet-facing path (boundary section
+# 5). "presigned": the browser downloads straight from S3; only switch to this
+# once the ISSO confirms that path is covered by the SSP (review A4).
+DOWNLOAD_MODE = os.environ.get("DOWNLOAD_MODE", "stream")
+if DOWNLOAD_MODE not in ("stream", "presigned"):
+    raise RuntimeError(f"DOWNLOAD_MODE must be 'stream' or 'presigned', not {DOWNLOAD_MODE!r}")
+STREAM_CHUNK_BYTES = 1024 * 1024
 
 
 def _required_env(name: str) -> str:
@@ -135,12 +146,28 @@ def create_export(body: ExportRequest, user: dict = Depends(enabled_user)) -> di
 
 
 @app.get("/exports/{export_id}/download")
-def download(export_id: uuid.UUID, user: dict = Depends(enabled_user)) -> dict:
+def download(export_id: uuid.UUID, user: dict = Depends(enabled_user)):
     # Scoped by tenant in the query. Another tenant's export looks exactly like
     # a missing one (404), so export IDs can't be probed.
     export = get_export(str(export_id), user["tenant_id"])
     if export is None or export["status"] != "done":
         raise HTTPException(status_code=404)
+
+    if DOWNLOAD_MODE == "stream":
+        obj = s3.get_object(Bucket=BUCKET, Key=export["s3_key"])
+        log.info(
+            "streaming export %s tenant %s sub %s bytes %s",
+            export_id, user["tenant_id"], user["sub"], obj["ContentLength"],
+        )
+        return StreamingResponse(
+            obj["Body"].iter_chunks(STREAM_CHUNK_BYTES),
+            media_type="application/vnd.apache.parquet",
+            headers={
+                "Content-Disposition": f'attachment; filename="export-{export_id}.parquet"',
+                "Content-Length": str(obj["ContentLength"]),
+                "Cache-Control": "no-store",
+            },
+        )
 
     url = s3.generate_presigned_url(
         "get_object",

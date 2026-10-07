@@ -3,6 +3,8 @@
 - name: {{ $k }}
   value: {{ $v | quote }}
 {{- end }}
+- name: DOWNLOAD_MODE
+  value: {{ include "export-service.downloadMode" . | quote }}
 - name: EXPORT_ENABLED_TENANTS
   value: {{ join "," .Values.exports.enabledTenants | quote }}
 - name: DB_HOST
@@ -39,4 +41,16 @@
   ports:
     - port: 5432
 {{- end }}
+{{- end }}
+
+
+{{- define "export-service.downloadMode" -}}
+{{- $mode := .Values.download.mode -}}
+{{- if not (has $mode (list "stream" "presigned")) -}}
+{{- fail (printf "download.mode must be stream or presigned, not %q" $mode) -}}
+{{- end -}}
+{{- if eq $mode "presigned" -}}
+{{- $_ := required "download.issoApprovalRef is required for presigned downloads (review A4)" .Values.download.issoApprovalRef -}}
+{{- end -}}
+{{- $mode -}}
 {{- end }}
