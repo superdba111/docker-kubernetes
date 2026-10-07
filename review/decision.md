@@ -63,8 +63,10 @@ What's left before it can be enabled:
    - **Terraform:** run `terraform plan`.
    - **Namespace:** confirm the `exports` namespace has default-deny.
    - **Rescan:** the scan gate must be clean (fixable Critical/High).
-   - **Inputs:** approved pip mirror (the build now fails without one); names
-     of the endpoint and RDS security groups; review of the ingress rules the
+   - **Inputs:** approved pip mirror (the build now fails without one);
+     `s3-fips`, `sqs` and `sts` interface endpoints with private DNS
+     (`terraform plan` now fails without them); the exports RDS security group
+     name; review of the ingress rules the
      branch adds to baseline security groups; confirm security groups for pods
      (`ENABLE_POD_ENI`) so the pod security group actually applies.
 4. **FIPS for DB TLS (Wed), a production gate.** The Postgres driver bundles its

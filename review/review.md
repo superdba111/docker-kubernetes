@@ -4,7 +4,7 @@ Reviewer: @foundry/security-review (Maxwell Li) · Reviewed at PR head `fcbf06d`
 Rules applied: `docs/authorization-boundary.md`, `docs/security-review-policy.md`.
 Pattern baseline: `ingest-api` (SR-2026-031).
 
-**Outcome: Changes requested.** 4 × Blocker (boundary), 15 × Blocker, 14 × Pre-prod,
+**Outcome: Changes requested.** 4 × Blocker (boundary), 15 × Blocker, 17 × Pre-prod,
 4 × Follow-up, 2 × Nit, 9 × No action. See `decision.md` for what can ship Friday.
 
 Line numbers refer to the PR head (`fcbf06d`), not to my fix commit.
@@ -196,6 +196,17 @@ bug or a tampered row would hand one tenant another tenant's file.
   `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. It's used as an S3 prefix and an IAM
   session tag, so no `/`, wildcards or lookalikes (`tenant-a` vs `tenant-ab`).
 - **Tests:** rogue key, lookalike prefixes, malformed tenants.
+
+### B7. `app/db.py`: one database connection shared by every request thread
+**Pre-prod** · *fixed in this branch* (`59436f8`) · found while fixing G3
+
+The PR's `db.py` opened one global psycopg connection and shared it across
+FastAPI's request threads. Statements from concurrent requests could land in
+each other's transactions, so neither tenant scoping nor any lock could be
+relied on.
+
+**Fix (done):** a connection pool, one connection per request. That's also what
+makes the G3 concurrency fix work.
 
 ---
 
@@ -405,6 +416,36 @@ governed anything, because nothing attached the SG to the pods. Now:
 `ipBlock` for RDS, because NetworkPolicy can't reference AWS security groups;
 the pod SG is the precise control.
 
+### E7. NetworkPolicies didn't allow DNS or the AWS endpoints
+**Pre-prod** · *fixed in this branch* (`dbf566a`) · found in sixth-pass review
+
+My policies assumed a "platform-egress" policy would provide DNS and AWS API
+access. Nothing in the repo shows that policy exists. Under default-deny, every
+DNS lookup and AWS call from the api and worker would fail.
+
+**Fix (done):**
+- **DNS:** every policy now allows `kube-dns` on 53 UDP/TCP.
+- **AWS endpoints:** api and worker allow 443 to the interface-endpoint
+  addresses, which Terraform outputs as `export_service_endpoint_cidrs`.
+- **Render gate:** the chart refuses to enable a tenant without those
+  addresses.
+
+### E8. FIPS S3 calls had no network path
+**Pre-prod** · *fixed in this branch* (`dbf566a`) · found in sixth-pass review
+
+With `AWS_USE_FIPS_ENDPOINT=true` the SDK calls `s3-fips.us-gov-west-1`
+(verified with botocore). The SG only allowed the S3 **gateway** endpoint, which
+doesn't serve the FIPS host. My F2 fix turned FIPS on without a route to it.
+
+**Fix (done):** Terraform now looks up the interface endpoints for exactly the
+hosts the SDK resolves: `s3-fips`, `sqs`, `sts`. The pods never call KMS
+directly; S3 and SQS do that for them.
+- **Plan fails** if any endpoint is missing, isn't an Interface endpoint, or
+  lacks private DNS.
+- **Security groups:** rules target those endpoints' own SGs, which also
+  removes the endpoint-SG name I'd guessed.
+- **Platform:** create any missing endpoint. Plan will name it.
+
 ### E4. Missing service NetworkPolicy
 **Pre-prod** · *fixed in this branch*
 
@@ -470,9 +511,12 @@ tenant-scoped per-job role (B4).
   - **Enqueue failure:** marks the job failed (503) instead of leaving it
     `queued`.
 
+  - **Race:** *fixed (`59436f8`)*. Check and insert now run in one
+    transaction under a per-tenant advisory lock, with no schema change. Tested
+    against real Postgres 15: under 20 concurrent requests the old pattern
+    admitted several, the new one exactly one.
+
   **Still open:**
-  - **Race:** the concurrency check can race. It needs a partial unique index
-    in the (absent) migrations.
   - **Size:** no cap on the output file yet.
   - **Duplicate requests:** no `Idempotency-Key`, so a double-click can still
     create two requests; the second gets 429.
@@ -568,6 +612,8 @@ fixed in-repo, mostly by copying `ingest-api`. One commit per theme:
 | `5cba6d7` | F6 | Package mirror mandatory; no credentials in build args (BuildKit secret instead) |
 | `030593b` | E6 | `SecurityGroupPolicy` attaches the SG; matching ingress on destination SGs; probe ingress; migrate pods labelled + NetworkPolicy |
 | `49af428` | B6, G3 | S3 key must be under the tenant prefix; strict `tenant_id` format; stream closes S3 body; range/concurrency limits; enqueue-failure handling; 32 tests |
+| `dbf566a` | E7, E8 | Interface endpoints (s3-fips, sqs, sts) looked up, plan fails if missing / no private DNS; SG rules target their SGs; NetworkPolicy allows DNS + endpoint addresses, render gate |
+| `59436f8` | B7, G3 | Connection pool; per-tenant advisory lock around check + insert; real-Postgres concurrency tests (opt-in) |
 
 **One behaviour change the author must confirm (C4).** The migrator no longer
 seeds `export-config` ConfigMaps into tenant namespaces. That was the only
@@ -578,7 +624,8 @@ reviewed by Security. Until then, the export service shouldn't depend on it.
 ### How to verify (no AWS account needed)
 ```
 python3.12 -m venv .venv && .venv/bin/pip install --require-hashes -r services/export-service/requirements-dev.txt
-.venv/bin/pytest services/export-service               # 32 passed
+.venv/bin/pytest services/export-service               # 32 passed, 4 skipped (DB tests)
+# with a disposable Postgres: EXPORT_TEST_PG=1 DB_HOST=... DB_PORT=... DB_NAME=... DB_USER=... DB_PASSWORD=... DB_SSLMODE=disable  -> 36 passed
 helm lint helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml --set image.tag=x
 helm template t helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml   # fails: image.tag is required (intended)
 cd terraform/envs/govhigh
@@ -605,11 +652,11 @@ the worker runs 0 replicas, migrations are off, and delivery is streaming only.
 | 3 | **Rotate** the RDS password (still in git history); populate `govhigh/export-service/db-password` and the in-boundary Sentry DSN | Operational | Data Products + Platform |
 | 4 | **G6: FIPS for DB TLS. A production gate.** RA-2026-015 is a draft and grants nothing until both approvers sign; otherwise remediate (system libpq on the hardened image) | Needs Platform's hardened-image answer and two approvers | Platform + Security + Platform EM |
 | 5 | Confirm `raw-ingest` keys are `<tenant_id>/...` (B4 assumption) | ingest code is in another repo | Ingest team |
-| 6 | Platform inputs: OIDC role `gha-ecr-push-export-service`, ECR repo, approved pip mirror (build fails without it), SG names (E3), review of the ingress rules added to baseline SGs and `ENABLE_POD_ENI` (E6), runner isolation (C5), `exports` namespace default-deny | Needs Platform | Platform |
+| 6 | Platform inputs: OIDC role `gha-ecr-push-export-service`, ECR repo, approved pip mirror (build fails without it), **`s3-fips`/`sqs`/`sts` interface endpoints with private DNS (plan fails without them, E8)**, exports RDS SG name (E3), review of the ingress rules added to baseline SGs and `ENABLE_POD_ENI` (E6), runner isolation (C5), `exports` namespace default-deny | Needs Platform | Platform |
 | 7 | Portal: confirm in-cluster JWKS service name and token issuer (B5) | Portal team | Portal team |
 | 8 | `terraform plan`, first image build, trivy rescan on the hardened base | Needs #6 | Platform |
 | 9 | **A4:** only if presigned links are wanted, ISSO approval reference | Streaming works without it | ISSO |
-| 10 | Concurrency partial unique index + export size cap (G3); scan Mediums/Lows within SLA; G4–G5 | Index belongs in the absent migrations | Data Products |
+| 10 | Export size cap and idempotency key (G3); scan Mediums/Lows within SLA; G4–G5 | Lower priority | Data Products |
 
 ### What I'd do next, in order
 Items 2 and 3 today. Then 1, the real gate, alongside 4–7. Then 8, and enable

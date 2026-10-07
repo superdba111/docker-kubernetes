@@ -7,11 +7,11 @@ I reviewed the PR myself first and wrote my own notes. I then used the tool to:
 - draft the four `review/` documents, which I then edited
 - write the fix commits
 
-I reviewed its output five times and sent corrections back each time.
+I reviewed its output six times and sent corrections back each time.
 
 **Verification run (not just the tool's say-so):**
 - **Tests:** `pip install -r services/export-service/requirements-dev.txt &&
-  pytest services/export-service` in a fresh Python 3.12 venv with `--require-hashes`: 32 passed.
+  pytest services/export-service` in a fresh Python 3.12 venv with `--require-hashes`: 32 passed, plus 4 concurrency tests against a disposable Postgres 15 (36 total).
 - **Terraform:** `terraform init -backend=false && terraform validate` and
   `terraform fmt -check` pass. No `terraform plan` (no govhigh access).
 - **Helm:** `helm lint` / `helm template` pass with an image tag. Rendering
@@ -82,6 +82,15 @@ I reviewed its output five times and sent corrections back each time.
 - **Fifth pass: smaller items:** closing the S3 stream on disconnect, range
   and concurrency limits, the enqueue-failure path, calling `issoApprovalRef`
   a breadcrumb rather than proof, and duplicated text in the report.
+- **Sixth pass: FIPS with no route:** the tool turned on FIPS endpoints but
+  only opened the S3 *gateway* endpoint, which doesn't serve `s3-fips`. Its
+  NetworkPolicies also assumed an unverified platform policy for DNS and AWS.
+  Terraform now looks up the exact interface endpoints, and plan fails if they
+  are missing; the policies allow DNS and the endpoint addresses explicitly.
+- **Sixth pass: the concurrency race:** fixing it exposed a worse bug: one DB
+  connection shared across request threads (B7). The fix (pool + advisory lock)
+  was tested against a real Postgres, including a control test showing the old
+  pattern does race.
 - **Inconsistent fallback:** `decision.md` offered a presigned-S3 one-off as
   the fallback while also saying the ISSO had to approve presigned S3. It's now
   conditional, with portal-mediated delivery as the default.
