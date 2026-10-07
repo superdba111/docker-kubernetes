@@ -125,3 +125,29 @@ def test_create_export_rejects_reversed_range(client):
         headers={"Authorization": f"Bearer {_token()}"},
     )
     assert resp.status_code == 422
+
+
+def test_tenant_not_enabled_gets_404_and_nothing_is_queued(client, monkeypatch):
+    inserted = []
+    monkeypatch.setattr(main, "insert_export", inserted.append)
+    monkeypatch.setattr(main.sqs, "send_message", lambda **kw: inserted.append(kw))
+    resp = client.post(
+        "/exports",
+        json={"start": "2026-01-01", "end": "2026-02-01"},
+        headers={"Authorization": f"Bearer {_token(tenant_id='tenant-c')}"},
+    )
+    assert resp.status_code == 404
+    assert inserted == []
+
+
+def test_enabled_tenant_can_queue(client, monkeypatch):
+    inserted = []
+    monkeypatch.setattr(main, "insert_export", inserted.append)
+    monkeypatch.setattr(main.sqs, "send_message", lambda **kw: inserted.append(kw))
+    resp = client.post(
+        "/exports",
+        json={"start": "2026-01-01", "end": "2026-02-01"},
+        headers={"Authorization": f"Bearer {_token()}"},
+    )
+    assert resp.status_code == 200
+    assert inserted[0]["tenant_id"] == "tenant-a"

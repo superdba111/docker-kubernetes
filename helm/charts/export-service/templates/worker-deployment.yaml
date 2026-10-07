@@ -6,7 +6,8 @@ metadata:
     app.kubernetes.io/name: export-service
     app.kubernetes.io/component: worker
 spec:
-  replicas: {{ .Values.workerReplicaCount }}
+  # Scaled to zero while the feature flag is off.
+  replicas: {{ if .Values.exports.enabledTenants }}{{ .Values.workerReplicaCount }}{{ else }}0{{ end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: export-service

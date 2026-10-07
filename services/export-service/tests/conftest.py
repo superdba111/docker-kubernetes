@@ -11,4 +11,5 @@ os.environ.setdefault("EXPORT_QUEUE_URL", "https://sqs.us-gov-west-1.amazonaws.c
 os.environ.setdefault("JWT_ISSUER", "https://portal.test")
 os.environ.setdefault("JWT_AUDIENCE", "export-service")
 os.environ.setdefault("JWT_JWKS_URL", "https://portal.test/.well-known/jwks.json")
+os.environ.setdefault("EXPORT_ENABLED_TENANTS", "tenant-a, tenant-b")
 os.environ.pop("SENTRY_DSN", None)

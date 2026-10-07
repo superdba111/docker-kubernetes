@@ -3,6 +3,8 @@
 - name: {{ $k }}
   value: {{ $v | quote }}
 {{- end }}
+- name: EXPORT_ENABLED_TENANTS
+  value: {{ join "," .Values.exports.enabledTenants | quote }}
 - name: DB_HOST
   value: {{ .Values.database.host | quote }}
 - name: DB_NAME

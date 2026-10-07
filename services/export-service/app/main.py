@@ -60,6 +60,13 @@ JWT_AUDIENCE = _required_env("JWT_AUDIENCE")
 JWT_ALGORITHMS = ["RS256"]
 _jwks = jwt.PyJWKClient(_required_env("JWT_JWKS_URL"), cache_keys=True)
 
+# Feature flag. Exports are off for every tenant unless explicitly enabled
+# (launch plan: one customer first). Not-enabled tenants get 404, as if the
+# feature didn't exist.
+ENABLED_TENANTS = frozenset(
+    t.strip() for t in os.environ.get("EXPORT_ENABLED_TENANTS", "").split(",") if t.strip()
+)
+
 app = FastAPI()
 
 
@@ -89,6 +96,12 @@ def current_user(authorization: str = Header(...)) -> dict:
     return claims
 
 
+def enabled_user(user: dict = Depends(current_user)) -> dict:
+    if user["tenant_id"] not in ENABLED_TENANTS:
+        raise HTTPException(status_code=404)
+    return user
+
+
 class ExportRequest(BaseModel):
     start: datetime.date
     end: datetime.date
@@ -106,7 +119,7 @@ def healthz() -> dict:
 
 
 @app.post("/exports")
-def create_export(body: ExportRequest, user: dict = Depends(current_user)) -> dict:
+def create_export(body: ExportRequest, user: dict = Depends(enabled_user)) -> dict:
     export_id = str(uuid.uuid4())
     job = {
         "export_id": export_id,
@@ -122,7 +135,7 @@ def create_export(body: ExportRequest, user: dict = Depends(current_user)) -> di
 
 
 @app.get("/exports/{export_id}/download")
-def download(export_id: uuid.UUID, user: dict = Depends(current_user)) -> dict:
+def download(export_id: uuid.UUID, user: dict = Depends(enabled_user)) -> dict:
     # Scoped by tenant in the query. Another tenant's export looks exactly like
     # a missing one (404), so export IDs can't be probed.
     export = get_export(str(export_id), user["tenant_id"])

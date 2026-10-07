@@ -1,6 +1,12 @@
 replicaCount: 2
 workerReplicaCount: 2
 
+# Feature flag. Empty = exports disabled for everyone and the worker scaled to
+# 0. Enable per tenant only after the worker code is reviewed with per-tenant
+# scoped access (review B4/G1).
+exports:
+  enabledTenants: []
+
 image:
   repository: 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/foundry/export-service
   # Immutable tag set by CI (git SHA). Never "latest".
@@ -46,7 +52,8 @@ externalSecret:
     DB_PASSWORD: govhigh/export-service/db-password  # rotate: the old value was committed
 
 migrations:
-  enabled: true
+  # Off until the migrate module is in the PR and reviewed (review G1).
+  enabled: false
 
 resources:
   requests: { cpu: 500m, memory: 1Gi }
