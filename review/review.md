@@ -250,12 +250,12 @@ commit, so each can be reviewed, split into its own PR, or dropped:
 | Theme | Findings | Commits |
 |---|---|---|
 | Boundary | A2, A3, F1 | `a94ddf8`, `b63f93d`, `089a611` |
-| CI and ownership | C1, C3, F8 | `089a611`, `35e1fe1`, latest commit |
+| CI and ownership | C1, C3, F8 | `089a611`, `35e1fe1`, `7df30da` |
 | Identity and per-tenant access | E5, B4 (IAM), flag | `06976c9`, `8fb1c5a`, `1f5770a` |
-| Network | E3, E4 | `00cd76d`, `030593b`, `dbf566a`, `14daebe`, latest commit |
+| Network | E3, E4 | `00cd76d`, `030593b`, `dbf566a`, `14daebe`, `7df30da` |
 | Secrets and workload | C2, C4, F3–F5, F7 | `a94ddf8`, `27d8e75` |
 | Delivery | A4 | `d0fd221` |
-| Dependencies | F6, G6, F9, scan rows | `0ed306f`, `5cba6d7`, `dd0fff4`, latest commit |
+| Dependencies | F6, G6, F9, scan rows | `0ed306f`, `5cba6d7`, `dd0fff4`, `7df30da` |
 | API robustness | B6, B7, G3 limits | `49af428`, `59436f8` |
 
 Commit messages also mention B5, C5 and E6–E9. Those were defects in my own
