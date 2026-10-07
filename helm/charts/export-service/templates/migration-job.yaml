@@ -1,6 +1,11 @@
 {{- if .Values.migrations.enabled }}
-# Runs schema migrations and seeds export-config ConfigMaps in every tenant
-# namespace. Needs cluster-wide access because tenants live in many namespaces.
+# Runs DB schema migrations only. It needs no Kubernetes API access, so the
+# ServiceAccount has no RoleBindings and no token is mounted.
+#
+# Seeding export-config ConfigMaps into tenant namespaces (previously done here
+# with cluster-admin) is removed. If it is still needed, it gets a dedicated,
+# security-reviewed design: a namespaced Role limited to the export-config
+# ConfigMap in each tenant namespace (boundary section 4).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -9,23 +14,7 @@ metadata:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ .Release.Name }}-migrator
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "-5"
-    "helm.sh/hook-delete-policy": before-hook-creation
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin
-subjects:
-  - kind: ServiceAccount
-    name: {{ .Release.Name }}-migrator
-    namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: false
 ---
 apiVersion: batch/v1
 kind: Job
@@ -34,17 +23,22 @@ metadata:
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "0"
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 1
   template:
     spec:
       serviceAccountName: {{ .Release.Name }}-migrator
+      automountServiceAccountToken: false
       restartPolicy: Never
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
       containers:
         - name: migrate
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          command: ["python", "-m", "migrate", "--seed-tenant-configmaps"]
+          image: "{{ .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}"
+          command: ["python", "-m", "migrate"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           env:
             - name: DB_HOST
               value: {{ .Values.database.host | quote }}
@@ -57,4 +51,10 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-secrets
                   key: DB_PASSWORD
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 {{- end }}

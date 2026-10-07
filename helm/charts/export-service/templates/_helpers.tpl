@@ -20,3 +20,21 @@
       name: {{ .Release.Name }}-secrets
       key: SENTRY_DSN
 {{- end }}
+
+{{- define "export-service.egress" -}}
+- to:
+    {{- range .Values.networkPolicy.egressToNamespaces }}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ . }}
+    {{- end }}
+{{- with .Values.networkPolicy.egressCidrs }}
+- to:
+    {{- range . }}
+    - ipBlock:
+        cidr: {{ . }}
+    {{- end }}
+  ports:
+    - port: 5432
+{{- end }}
+{{- end }}

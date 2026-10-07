@@ -1,0 +1,38 @@
+# Namespace default-deny is applied by the platform baseline (Platform to
+# confirm it covers the exports namespace). These policies open only what each
+# component needs. AWS APIs are reached via VPC endpoints (platform-egress).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: export-service
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.ingressFromNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - port: 8080
+  egress:
+    {{- include "export-service.egress" . | nindent 4 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-worker
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: export-service
+      app.kubernetes.io/component: worker
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- include "export-service.egress" . | nindent 4 }}

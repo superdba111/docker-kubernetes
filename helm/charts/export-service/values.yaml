@@ -2,9 +2,10 @@ replicaCount: 2
 workerReplicaCount: 2
 
 image:
-  repository: docker.io/foundryeng/export-service
-  tag: latest
-  pullPolicy: Always
+  repository: 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/foundry/export-service
+  # Immutable tag set by CI (git SHA). Never "latest".
+  tag: ""
+  pullPolicy: IfNotPresent
 
 # Separate identities: the API must not hold the worker's raw-ingest access.
 serviceAccounts:
@@ -27,7 +28,7 @@ env:
   JWT_ISSUER: ""
   JWT_AUDIENCE: export-service
   JWT_JWKS_URL: ""
-  LOG_LEVEL: DEBUG
+  LOG_LEVEL: INFO
   SENTRY_ENVIRONMENT: govhigh
   SENTRY_TRACES_SAMPLE_RATE: "0.05"
 
@@ -51,4 +52,20 @@ resources:
   requests: { cpu: 500m, memory: 1Gi }
   limits:   { memory: 4Gi }
 
-securityContext: {}
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+networkPolicy:
+  ingressFromNamespaces: [ingress-nginx]
+  egressToNamespaces: [sentry]
+  egressCidrs: [10.40.0.0/16]   # RDS (port 5432 only)
