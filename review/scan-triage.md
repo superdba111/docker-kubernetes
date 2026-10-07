@@ -63,8 +63,13 @@ for the image as built.
 | moto 5.0.3 | CVE-2026-90152 | HIGH | **Not applicable** to the image; **fix within SLA** for CI | Same reasoning. → 5.0.9 |
 
 **Before launch:** the two OS fix-now rows (openssl via a rebuild, curl by
-removing it) plus pyarrow, gunicorn, PyJWT, and setuptools. That's under an hour of
-work. Only one Critical needs paperwork, below.
+removing it) plus pyarrow, gunicorn, PyJWT, and setuptools.
+
+**Done on `review/maxwell-li`:** pyarrow 15.0.2, gunicorn 23.0.0, PyJWT 2.10.1,
+requests 2.32.3, sentry-sdk 2.19.2, responses 0.25.0, moto 5.0.9. CI now runs
+trivy with `--exit-code 1`. **Still open:** openssl, curl and setuptools come
+from the `python:3.12-slim` base. They're fixed by moving to the hardened FIPS
+image (Platform), then rescanning the ECR image.
 
 ---
 

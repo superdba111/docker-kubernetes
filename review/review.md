@@ -4,7 +4,7 @@ Reviewer: @foundry/security-review (Maxwell Li) · Reviewed at PR head `fcbf06d`
 Rules applied: `docs/authorization-boundary.md`, `docs/security-review-policy.md`.
 Pattern baseline: `ingest-api` (SR-2026-031).
 
-**Outcome: Changes requested.** 4 × Blocker (boundary), 13 × Blocker, 10 × Pre-prod,
+**Outcome: Changes requested.** 4 × Blocker (boundary), 14 × Blocker, 10 × Pre-prod,
 4 × Follow-up, 2 × Nit, 9 × No action. See `decision.md` for what can ship Friday.
 
 Line numbers refer to the PR head (`fcbf06d`), not to my fix commit.
@@ -45,7 +45,7 @@ contract requires DR for exports, replicate to the GovCloud DR account as a
 follow-up.
 
 ### A2. `helm/charts/export-service/values.yaml:20-21`, `app/main.py:21-26`: errors and traces go to sentry.io (SaaS)
-**Blocker (boundary)**
+**Blocker (boundary)** · *fixed in this branch*
 
 `SENTRY_DSN` points at `o448812.ingest.sentry.io`, with `send_default_pii=True`
 and `traces_sample_rate=1.0`. That sends request bodies, headers (including the
@@ -60,7 +60,7 @@ at `sentry.govhigh.internal` as `ingest-api` does. Set `send_default_pii=False`
 and a low trace sample rate. Upgrade `sentry-sdk` (see scan triage).
 
 ### A3. `values.yaml:3-6`, `.github/workflows/export-service.yml:25-42`, `Dockerfile`: images built and served from Docker Hub
-**Blocker (boundary)**
+**Blocker (boundary)** · *partly fixed in this branch: CI pushes to ECR; base image still `python:3.12-slim` (F1, Platform)*
 
 The govhigh cluster would pull its runtime image from `docker.io/foundryeng`,
 built by a GitHub-hosted runner. The only allowed registry is ECR in
@@ -138,17 +138,31 @@ The worker takes `tenant_id` from the SQS message, so the API is now the only
 thing keeping tenants apart. Anyone who can send to the queue, and `sqs:*` (E2)
 lets the role do exactly that, can export any tenant's data.
 
-**Instead:** at minimum, the worker must only read under the tenant's prefix and
-must check that the job row in the DB matches the message (`id`, `tenant_id`).
-That code isn't in this PR (see G1). Longer term, tag objects by tenant and
-scope access with ABAC or per-tenant prefix conditions.
+**Status:** still open, and the main reason I can't approve this for prod. The
+API no longer shares this role (E5), and only the API and worker roles can use
+the queue (E2), but the worker itself is still all-tenant.
+
+**Instead:** a static IAM policy can't follow "the tenant of the current job".
+The mechanism that can:
+1. **Validate the job:** the worker reads the job row from the DB by `id` and
+   uses *that* `tenant_id`, never the one in the message.
+2. **Scope a session to the tenant:** for each job, the worker calls
+   `sts:AssumeRole` (role chaining from its IRSA role) with a **session policy**
+   limited to `raw-ingest/<tenant>/*` and `customer-exports/<tenant>/*`, and
+   uses only those credentials to process the job. A worker bug can then only
+   reach the job's tenant.
+3. **Prerequisite:** confirm that `raw-ingest` keys are tenant-prefixed (the
+   ingest code is in another repo).
+
+The worker code isn't in this PR (G1), so this can't be written or reviewed
+here.
 
 ---
 
 ## C. Blocker: credentials and supply chain
 
 ### C1. `.github/workflows/export-service.yml:3-42`: `pull_request_target` runs fork code with govhigh deploy secrets
-**Blocker**
+**Blocker** · *fixed in this branch*; **credential revocation still outstanding (ops)**
 
 `pull_request_target` runs with the base repo's secrets. The job then checks out
 `github.event.pull_request.head.sha` (`:17`), the **fork's** code, and runs
@@ -174,7 +188,7 @@ SHA tags; pinned actions. **Revoke and rotate** `GOVHIGH_DEPLOY_AWS_*` and
 both as compromised and check CloudTrail.
 
 ### C2. `helm/charts/export-service/values-govhigh.yaml:9`: production DB password committed
-**Blocker**
+**Blocker** · *fixed in this branch*; **rotation in RDS still outstanding (ops)**
 
 `password: "Xp0rt-svc!2026-govhigh"` is in git, so it's in every clone and in
 history. The PR checklist says "No secrets committed", which is false, and that
@@ -191,7 +205,7 @@ keyed at `govhigh/export-service/db-password`. Have the migration job use
 `secretKeyRef`.
 
 ### C3. `CODEOWNERS:13-17`: Security Review removed as a required reviewer on the new paths
-**Blocker**
+**Blocker** · *fixed in this branch*
 
 "Last matching pattern wins." The new entries make `@foundry/data-products` the
 **only** owner of `/helm/charts/export-service/`, `/.github/workflows/export-service.yml`,
@@ -212,7 +226,7 @@ which require Platform and Security Review. Two consequences:
 ```
 
 ### C4. `helm/charts/export-service/templates/migration-job.yaml:13-28`: `cluster-admin` bound to a workload
-**Blocker**
+**Blocker** · *fixed in this branch* (ConfigMap seeding removed; see C4 note in the fix section)
 
 Boundary §4: "`cluster-admin` … is never bound to workloads." "It's short-lived"
 doesn't help:
@@ -308,7 +322,7 @@ allow-listed. Once A2 is fixed, nothing legitimate needs the internet. Restrict
 egress to the VPC endpoint prefix lists / VPC CIDR, plus the in-cluster Sentry.
 
 ### E4. Missing service NetworkPolicy
-**Pre-prod**
+**Pre-prod** · *fixed in this branch*
 
 The platform baseline applies namespace default-deny. The chart needs its own
 allow policy, as `ingest-api` has: ingress from `ingress-nginx` only, egress to
@@ -316,19 +330,40 @@ allow policy, as `ingest-api` has: ingress from `ingress-nginx` only, egress to
 `exports` namespace actually gets the baseline default-deny. If it doesn't, the
 pod is reachable from everywhere in the cluster.
 
+### E5. `deployment.yaml:17`, `data_export.tf` IRSA: API and worker share one pod and one role
+**Blocker** · *fixed in this branch* · found in a second-pass review, not my first pass
+
+The `api` and `worker` containers run in the same pod under one service
+account, so the portal-facing API holds the worker's permissions: read access
+to **every tenant's** raw data and write access to the export bucket. Any bug
+in the API (say an SSRF or a library RCE like the gunicorn/pyarrow rows in the
+scan) is then a bug with cross-tenant data access.
+
+**Fix (done):** separate Deployments, ServiceAccounts and IRSA roles.
+- **API (`exports:export-api`):** `s3:GetObject` and `kms:Decrypt` on exports,
+  the minimum for signing download URLs (a presigned URL carries the signer's
+  permissions); `sqs:SendMessage`. No access to `raw-ingest`.
+- **Worker (`exports:export-worker`):** read `raw-ingest`, put exports,
+  consume the queue.
+
+The worker's access is still **all tenants**: see B4 for why a static policy
+can't fix that, and what will.
+
 ---
 
 ## F. Pre-prod: workload and image hardening
 
+✅ = fixed in this branch.
+
 | # | Where | Finding | Instead |
 |---|---|---|---|
 | F1 | `Dockerfile:1,7` | `python:3.12-slim` from Docker Hub, not the hardened FIPS image (boundary §3). This base also accounts for most of the OS findings in the scan | `…/hardened/python:3.12-fips`. For libpq 17, ask Platform to add it to the hardened image, or install from an in-boundary mirror |
-| F2 | `values.yaml:14`, `main.py:28-32` | `S3_ENDPOINT_URL` overrides the endpoint with a **non-FIPS** URL, and `AWS_USE_FIPS_ENDPOINT` isn't set (boundary §3: "do not override endpoints with non-FIPS URLs") | Remove `S3_ENDPOINT_URL`; set `AWS_USE_FIPS_ENDPOINT: "true"` |
-| F3 | `values.yaml:36`, `deployment.yaml`, `Dockerfile` | Empty `securityContext`, no `USER`, so the pod runs as root with a writable root filesystem and all capabilities | Copy `ingest-api`: `runAsNonRoot`, `runAsUser: 10001`, seccomp `RuntimeDefault`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem`, drop ALL, `/tmp` emptyDir |
-| F4 | `values.yaml:4-6` | `tag: latest`, `pullPolicy: Always`, so you can't tell what's running and can't roll back | `tag: ""` + `required` in the template, set to the git SHA by CI; `IfNotPresent` |
-| F5 | `values.yaml:19`, `main.py` | `LOG_LEVEL: DEBUG` in govhigh: boto/urllib3 debug output includes signed request details | `INFO` |
+| F2 ✅ | `values.yaml:14`, `main.py:28-32` | `S3_ENDPOINT_URL` overrides the endpoint with a **non-FIPS** URL, and `AWS_USE_FIPS_ENDPOINT` isn't set (boundary §3: "do not override endpoints with non-FIPS URLs") | Remove `S3_ENDPOINT_URL`; set `AWS_USE_FIPS_ENDPOINT: "true"`. The SQS `EXPORT_QUEUE_URL` is **not** a problem: I checked botocore 1.34, which sends SQS requests to the resolved client endpoint, not the QueueUrl host. In GovCloud the SQS FIPS endpoint *is* `sqs.us-gov-west-1.amazonaws.com` |
+| F3 ✅ | `values.yaml:36`, `deployment.yaml`, `Dockerfile` | Empty `securityContext`, no `USER`, so the pod runs as root with a writable root filesystem and all capabilities | Copy `ingest-api`: `runAsNonRoot`, `runAsUser: 10001`, seccomp `RuntimeDefault`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem`, drop ALL, `/tmp` emptyDir |
+| F4 ✅ | `values.yaml:4-6` | `tag: latest`, `pullPolicy: Always`, so you can't tell what's running and can't roll back | `tag: ""` + `required` in the template, set to the git SHA by CI; `IfNotPresent` |
+| F5 ✅ | `values.yaml:19`, `main.py` | `LOG_LEVEL: DEBUG` in govhigh: boto/urllib3 debug output includes signed request details | `INFO` |
 | F6 | `requirements*.txt`, `Dockerfile:5` | No hash pinning (`--require-hashes`), unlike the reference | `pip-compile --generate-hashes` |
-| F7 | `serviceaccount.yaml` | No `automountServiceAccountToken: false` on the SA | Match `ingest-api` |
+| F7 ✅ | `serviceaccount.yaml` | No `automountServiceAccountToken: false` on the SA | Match `ingest-api` |
 
 ---
 
@@ -386,100 +421,72 @@ pod is reachable from everywhere in the cluster.
 
 ---
 
-## The fix I implemented: one theme, two commits
+## What I fixed on this branch
 
-**Theme: only the owning tenant can read an export, and exports stay inside
-the boundary.** That's B1–B3 (the API) and D1–D3, E1–E2, A1 (the bucket and IAM
-behind it). They have to ship together. Fixing only the API leaves every export
-readable with a faked `Referer` header. Fixing only the bucket leaves any user
-able to request a URL for another tenant's export.
+### The fix I chose, and why
+**Primary fix: tenant isolation for exports.** That's B1–B3 (the API) and D1–D3,
+E1–E2, A1 (the bucket and IAM behind it), in commits `70fce0a` and `42eec9f`. If
+I could only land one thing, it would be this, because:
+1. **Impact today:** any user (B1+B2), or anyone at all (D1), can read any
+   tenant's CUI.
+2. **It would survive cleanup:** removing Sentry SaaS or Docker Hub doesn't
+   touch it, and a reviewer could approve a tidied PR with it still there.
+3. **It's where review adds the most:** getting JWT verification right (pinned
+   algorithms, required claims, exact issuer match, fail-closed on JWKS errors)
+   and finding the real KMS root cause are easy to get subtly wrong.
 
-### Commit 1: `fix(export-service): verify session JWTs and scope downloads to tenant`
-- **`app/main.py`:**
-  - JWKS-based JWT verification (RS256 pinned; `iss`/`aud`/`exp`/`iat`/`sub`/`tenant_id` required)
-  - fails closed: 401 on a bad token, 503 if the JWKS endpoint is unreachable,
-    refuses to start without the JWT settings
-  - typed request body (no 500 on missing keys; rejects reversed ranges)
-  - `export_id: UUID`
-  - TTL default 15 min, capped at 1 h
-  - URL no longer logged
-- **`app/db.py`:** `get_export(export_id, tenant_id)` filters by tenant in SQL.
-- **`requirements.txt`:** `PyJWT[crypto]==2.10.1`. This adds the crypto backend
-  RS256 needs and fixes scan finding CVE-2026-90118 (issuer partial match).
-- **`values.yaml` / `values-govhigh.yaml`:** `JWT_ISSUER`, `JWT_AUDIENCE`,
-  `JWT_JWKS_URL`; TTL 900. The govhigh JWKS URL is marked TODO for the portal
-  team to confirm.
-- **`tests/test_auth.py`:** 14 tests covering owner allowed, other tenant 404,
-  forged signature, `alg=none`, wrong or partial-match issuer, wrong audience,
-  expired token, missing or empty tenant, URL absent from logs.
+The API and bucket halves have to ship together. Fixing only the API leaves
+every export readable with a faked `Referer` header; fixing only the bucket
+leaves any user able to request a URL for another tenant's export.
 
-### Commit 2: `fix(govhigh): make customer-exports private and in-boundary; scope export IAM`
-- **D1:** removed the Referer-gated public `GetObject`. All four public access
-  blocks are on, and `DenyInsecureTransport` is added.
-- **D2:** SSE-KMS with `data.aws_kms_key.customer_data` and bucket keys enabled.
-- **D3:** access logging to the central log bucket, and a 14-day lifecycle. Data
-  Products to confirm 14 days against the contract.
-- **A1:** removed the replication to the commercial DR bucket, along with its
-  role and variable.
-- **E1:** trust is now `StringEquals` on `:aud` and on
-  `:sub = system:serviceaccount:exports:export-service`.
-- **E2:** ARNs come from resources (`arn:aws:` no longer appears). KMS is scoped
-  to the customer-data key and the queue key; the missing customer-data grant
-  was the real cause of the staging `AccessDenied`. `sqs:*` is reduced to the
-  five actions used.
+### Everything else that's done
+After a second-pass review, I also fixed the other findings that could be
+fixed in-repo, mostly by copying `ingest-api`. One commit per theme:
+
+| Commit | Findings | What changed |
+|---|---|---|
+| `70fce0a` | B1–B3 | JWT verified against JWKS (RS256, `iss`/`aud`/`exp`/`iat`/`sub`/`tenant_id` required, fails closed); lookup by `(id, tenant_id)`; 15-min URLs, never logged; `PyJWT[crypto]` 2.10.1; 14 tests |
+| `42eec9f` | D1–D3, A1, E1, E2 | Bucket private + TLS-only + SSE-KMS (CMK) + logging + 14-day lifecycle; commercial replication removed; IRSA `aud`/`sub` pinned; partition-correct ARNs; KMS scoped to two keys; `sqs:*` removed |
+| `06976c9` | E5, F2 | Separate API/worker Deployments, SAs and IRSA roles; FIPS endpoints via the SDK, no S3 override |
+| `a94ddf8` | A2, C2 | ExternalSecret for `DB_PASSWORD`/`SENTRY_DSN` (pre-install hook, so migrations can use it); plaintext password and sentry.io DSN removed; `send_default_pii=False`, no request bodies; sentry-sdk 2.19.2 |
+| `27d8e75` | C4, E4, F3–F5, F7 | Migrator has no K8s permissions (no cluster-admin, no token); pod/container hardening; NetworkPolicies; ECR image, required immutable tag; `LOG_LEVEL=INFO` |
+| `089a611` | C1, A3 (CI), C3, scan | `pull_request` + OIDC + govhigh runner + ECR, gating trivy, pinned actions; CODEOWNERS keeps Platform/Security; `USER 10001`; pyarrow 15.0.2, gunicorn 23.0.0, requests 2.32.3, responses/moto bumped |
+
+**One behaviour change the author must confirm (C4).** The migrator no longer
+seeds `export-config` ConfigMaps into tenant namespaces. That was the only
+reason it had cluster-admin, and the code doing it isn't in the PR. If something
+consumes those ConfigMaps, it needs a namespaced Role per tenant namespace,
+reviewed by Security. Until then, the export service shouldn't depend on it.
 
 ### How to verify (no AWS account needed)
 ```
 pip install -r services/export-service/requirements-dev.txt
 pytest services/export-service                         # 14 passed
+helm lint helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml --set image.tag=x
+helm template t helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml   # fails: image.tag is required (intended)
 cd terraform/envs/govhigh
-terraform init -backend=false && terraform validate     # Success
-terraform fmt -check                                    # clean
+terraform init -backend=false && terraform validate && terraform fmt -check
 ```
-Before apply, Platform still needs a `terraform plan` against govhigh. It
-confirms the referenced data sources exist and shows the bucket-policy
-replacement and the removal of replication.
+I also checked FIPS endpoint resolution with botocore 1.34 and
+`AWS_USE_FIPS_ENDPOINT=true`. S3 and presigned URLs resolve to
+`s3-fips.us-gov-west-1.amazonaws.com`. SQS requests go to the resolved
+`sqs.us-gov-west-1.amazonaws.com` even with a different `QueueUrl` host.
 
-### Why this one
-1. **Impact today:** the most serious problem in the PR is that **any user
-   (B1+B2), or anyone at all (D1), can read any tenant's CUI**.
-2. **It would survive cleanup:** moving to ECR or in-boundary Sentry doesn't
-   touch it, and a reviewer could approve a tidied PR with it still there.
-3. **It's where review adds the most:** getting JWT verification right (pinned
-   algorithms, required claims, exact issuer match, behaviour when JWKS is down)
-   and finding the real KMS root cause are easy to get subtly wrong. Several of
-   the other fixes are deletions the author can do in an hour.
-4. **It's required anyway:** it's on the critical path for the reduced Friday
-   scope in `decision.md`.
+**Not verified:** no `terraform plan`, no image build, no trivy rescan, no
+deploy. Platform needs to do those before this goes anywhere near govhigh.
 
-### Deliberately not fixed on this branch (still open, still blocking)
-The exercise asks for one fix, not all of them. These remain open, and the
-**no-ship decision doesn't change** until they're done:
-- **A2, Sentry SaaS:** needs an in-boundary DSN from Secrets Manager and
-  `send_default_pii=False`. Mechanical once Platform provides the secret path.
-- **A3 + C1, CI and Docker Hub:** the workflow rewrite (OIDC, ECR,
-  `pull_request`, gating scan) needs a govhigh IAM role and runner that only
-  Platform can create. The **credential rotation** has to happen today, and
-  isn't a code change.
-- **C2, plaintext DB password:** removing the line is pointless until the
-  password is rotated in RDS and stored in Secrets Manager. Someone with RDS
-  access has to do that.
-- **C3, CODEOWNERS:** an ownership decision I've stated in the review; the
-  author should make the change.
-- **C4, cluster-admin:** the right fix depends on what `migrate` actually does
-  across tenant namespaces, and that code isn't in the PR (G1).
-- **B4 + G1, worker isolation:** the API is now tenant-scoped, but the worker
-  still trusts `tenant_id` from the SQS message and can read all of
-  `raw-ingest`. I can't review or fix code that isn't in the PR. This is the
-  biggest remaining gap in the theme above.
-- **F1–F7, hardening:** listed with exact changes.
+### Still open: the decision stays no-ship until these are done
+| # | What | Why it's not in this branch | Owner |
+|---|---|---|---|
+| 1 | **B4 / G1: worker is all-tenant**, and the `worker` and `migrate` code isn't in the PR | Can't fix or review code that isn't here. Mechanism described in B4 | Data Products |
+| 2 | **Revoke** `GOVHIGH_DEPLOY_AWS_*` and `DOCKERHUB_TOKEN`; check CloudTrail for fork-PR runs | Operational, today | Platform + Security |
+| 3 | **Rotate** the RDS password (it's in git history); populate `govhigh/export-service/db-password` and the in-boundary Sentry DSN | Operational | Data Products + Platform |
+| 4 | **F1: hardened FIPS base image** with libpq 17. The build still pulls `python:3.12-slim` from Docker Hub | Needs Platform's hardened image or an in-boundary mirror | Platform |
+| 5 | Create OIDC role `gha-ecr-push-export-service` (main-branch trust only) and ECR repo `foundry/export-service` | Needs Platform IAM | Platform |
+| 6 | `terraform plan`; confirm `exports` namespace default-deny; confirm JWKS URL / issuer | Needs environment access / portal team | Platform, portal team |
+| 7 | **A4:** ISSO confirms direct presigned S3 download is covered by the SSP | Compliance decision | ISSO |
+| 8 | E3 (SG egress `0.0.0.0/0`), F6 (hash pinning), scan Mediums/Lows | Lower priority; listed with exact changes | Data Products |
 
 ### What I'd do next, in order
-1. Rotate `GOVHIGH_DEPLOY_AWS_*`, `DOCKERHUB_TOKEN`, and the RDS password;
-   check CloudTrail.
-2. Review the `worker` and `migrate` code, then add the worker tenant check
-   (B4) and replace cluster-admin (C4).
-3. Rewrite the workflow from `ingest-api.yml` (C1/A3).
-4. Move secrets to ExternalSecrets, including in-boundary Sentry (C2/A2).
-5. Pod hardening and dependency upgrades (F, scan fix-now rows), then rescan
-   the ECR image.
+Items 2 and 3 today, then 1, then 4–6, then a rescan of the ECR image against
+the new-image gate.
