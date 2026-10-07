@@ -1,7 +1,5 @@
 name: export-service
 
-# Fork PRs run with `pull_request`: no secrets, no AWS, no push. Only pushes to
-# main (trusted code) assume the ECR push role via GitHub OIDC.
 on:
   pull_request:
     paths: ["services/export-service/**"]
@@ -9,21 +7,50 @@ on:
     branches: [main]
     paths: ["services/export-service/**"]
 
-permissions:
-  contents: read
-  id-token: write   # GitHub OIDC -> AWS
+# Nothing by default; each job asks for what it needs.
+permissions: {}
 
 jobs:
-  build:
-    runs-on: [self-hosted, govhigh-builder]
+  # Untrusted code (including fork PRs): unit tests only, on an ephemeral
+  # GitHub-hosted runner. No OIDC token, no secrets, no govhigh runner, no CUI.
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Test
         run: |
           python3 -m venv .venv
           .venv/bin/pip install -r services/export-service/requirements-dev.txt
           .venv/bin/pytest services/export-service
+
+  # Trusted code only (push to main): build from the hardened base, gate on the
+  # scan, push to in-boundary ECR. The only job that can request an OIDC token.
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: [self-hosted, govhigh-builder]
+    permissions:
+      contents: read
+      id-token: write   # GitHub OIDC -> AWS
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          # Platform to create; trust only repo:<org>/foundry-platform:ref:refs/heads/main.
+          role-to-assume: arn:aws-us-gov:iam::111122223333:role/gha-ecr-push-export-service
+          aws-region: us-gov-west-1
+
+      - name: Log in to ECR (hardened base pull + push)
+        run: |
+          aws ecr get-login-password | docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com
 
       - name: Build
         run: |
@@ -33,17 +60,8 @@ jobs:
         run: |
           trivy image --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH export-service:${GITHUB_SHA}
 
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
-        if: github.event_name == 'push'
-        with:
-          # Platform to create, trusted for repo:<org>/foundry-platform:ref:refs/heads/main only.
-          role-to-assume: arn:aws-us-gov:iam::111122223333:role/gha-ecr-push-export-service
-          aws-region: us-gov-west-1
-
-      - name: Push (main only)
-        if: github.event_name == 'push'
+      - name: Push
         run: |
           REG=111122223333.dkr.ecr.us-gov-west-1.amazonaws.com
-          aws ecr get-login-password | docker login --username AWS --password-stdin $REG
           docker tag export-service:${GITHUB_SHA} $REG/foundry/export-service:${GITHUB_SHA}
           docker push $REG/foundry/export-service:${GITHUB_SHA}
