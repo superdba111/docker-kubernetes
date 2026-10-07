@@ -259,16 +259,31 @@ resource "aws_iam_role_policy" "export_worker" {
 
 # --- Network (attached to pods via SecurityGroupPolicy) ---
 #
-# No internet egress (boundary section 5). AWS APIs are reached through VPC
-# endpoints: S3 via the gateway endpoint (managed prefix list), SQS/STS/KMS via
-# interface endpoints inside the VPC. In-cluster Sentry is also in the VPC.
-
-data "aws_vpc" "this" {
-  id = var.vpc_id
-}
+# No internet egress, and no CIDR-wide rules (boundary section 5). Every rule
+# names its destination:
+#   - S3: gateway VPC endpoint (managed prefix list)
+#   - SQS / STS / KMS: interface VPC endpoints (their security group)
+#   - In-cluster Sentry, portal JWKS, cluster DNS: the EKS cluster security group
+#   - Postgres: the exports RDS cluster's security group
 
 data "aws_prefix_list" "s3" {
   name = "com.amazonaws.${var.region}.s3"
+}
+
+# Owned by the platform baseline. TODO(Platform): confirm these two names; the
+# convention follows data.aws_security_group.ingress_controller in data.tf.
+data "aws_security_group" "vpc_endpoints" {
+  name   = "foundry-${var.environment}-vpc-endpoints"
+  vpc_id = var.vpc_id
+}
+
+data "aws_security_group" "exports_db" {
+  name   = "foundry-${var.environment}-exports-db"
+  vpc_id = var.vpc_id
+}
+
+locals {
+  eks_cluster_security_group_id = data.aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
 }
 
 resource "aws_security_group" "export_service" {
@@ -276,6 +291,7 @@ resource "aws_security_group" "export_service" {
   vpc_id = var.vpc_id
 
   ingress {
+    description     = "API from the ingress controller"
     from_port       = 8080
     to_port         = 8080
     protocol        = "tcp"
@@ -291,18 +307,42 @@ resource "aws_security_group" "export_service" {
   }
 
   egress {
-    description = "Interface VPC endpoints (SQS, STS, KMS) and in-cluster Sentry"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [data.aws_vpc.this.cidr_block]
+    description     = "SQS, STS, KMS via interface VPC endpoints"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [data.aws_security_group.vpc_endpoints.id]
   }
 
   egress {
-    description = "RDS"
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = ["10.40.0.0/16"]
+    description     = "In-cluster services: Sentry, portal JWKS"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [local.eks_cluster_security_group_id]
+  }
+
+  egress {
+    description     = "Cluster DNS (TCP)"
+    from_port       = 53
+    to_port         = 53
+    protocol        = "tcp"
+    security_groups = [local.eks_cluster_security_group_id]
+  }
+
+  egress {
+    description     = "Cluster DNS (UDP)"
+    from_port       = 53
+    to_port         = 53
+    protocol        = "udp"
+    security_groups = [local.eks_cluster_security_group_id]
+  }
+
+  egress {
+    description     = "Exports RDS cluster"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [data.aws_security_group.exports_db.id]
   }
 }
