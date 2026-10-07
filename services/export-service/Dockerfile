@@ -6,8 +6,14 @@
 # public repo outside the boundary.
 FROM 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/hardened/python:3.12-fips AS builder
 WORKDIR /build
+# Every package is pinned and hash-verified (requirements.txt is generated from
+# requirements.in). PIP_INDEX_URL points pip at the approved package mirror;
+# CI passes it. TODO(Platform): name the approved in-boundary mirror.
+ARG PIP_INDEX_URL
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: \
+      ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
+      --prefix=/install -r requirements.txt
 
 FROM 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/hardened/python:3.12-fips
 COPY --from=builder /install /usr/local

@@ -14,7 +14,7 @@ jobs:
   # Untrusted code (including fork PRs): unit tests only, on an ephemeral
   # GitHub-hosted runner. No OIDC token, no secrets, no govhigh runner, no CUI.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # Python 3.12, matching the image
     permissions:
       contents: read
     steps:
@@ -25,7 +25,7 @@ jobs:
       - name: Test
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install -r services/export-service/requirements-dev.txt
+          .venv/bin/pip install --require-hashes -r services/export-service/requirements-dev.txt
           .venv/bin/pytest services/export-service
 
   # Trusted code only (push to main): build from the hardened base, gate on the
@@ -54,7 +54,9 @@ jobs:
 
       - name: Build
         run: |
-          docker build -t export-service:${GITHUB_SHA} services/export-service
+          docker build \
+            --build-arg PIP_INDEX_URL="${{ vars.GOVHIGH_PIP_INDEX_URL }}" \
+            -t export-service:${GITHUB_SHA} services/export-service
 
       - name: Scan (blocks on fixable Critical/High)
         run: |
