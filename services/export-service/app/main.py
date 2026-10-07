@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, model_validator
 
-from db import count_active_exports, get_export, insert_export, mark_failed
+from db import create_export_if_idle, get_export, mark_failed
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("export-service")
@@ -159,9 +159,6 @@ def healthz() -> dict:
 
 @app.post("/exports")
 def create_export(body: ExportRequest, user: dict = Depends(enabled_user)) -> dict:
-    if count_active_exports(user["tenant_id"]) >= MAX_ACTIVE_PER_TENANT:
-        raise HTTPException(status_code=429, detail="an export is already in progress")
-
     export_id = str(uuid.uuid4())
     job = {
         "export_id": export_id,
@@ -170,7 +167,9 @@ def create_export(body: ExportRequest, user: dict = Depends(enabled_user)) -> di
         "start": body.start.isoformat(),
         "end": body.end.isoformat(),
     }
-    insert_export(job)
+    # Atomic per tenant: concurrent requests can't both pass the limit.
+    if not create_export_if_idle(job, MAX_ACTIVE_PER_TENANT):
+        raise HTTPException(status_code=429, detail="an export is already in progress")
     # The DB row is the source of truth; the worker must ignore messages whose
     # job isn't 'queued'. If the send fails, fail the row so it doesn't sit in
     # 'queued' forever and block the tenant's concurrency slot.

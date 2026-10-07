@@ -54,7 +54,7 @@ def _fake_get_export(export_id, tenant_id):
 def client(monkeypatch):
     monkeypatch.setattr(main, "_jwks", _FakeJWKS())
     monkeypatch.setattr(main, "get_export", _fake_get_export)
-    monkeypatch.setattr(main, "count_active_exports", lambda tenant_id: 0)
+    monkeypatch.setattr(main, "create_export_if_idle", lambda job, max_active: True)
     monkeypatch.setattr(main, "mark_failed", lambda export_id: None)
     return TestClient(main.app)
 
@@ -175,7 +175,7 @@ def test_create_export_rejects_reversed_range(client):
 
 def test_tenant_not_enabled_gets_404_and_nothing_is_queued(client, monkeypatch):
     inserted = []
-    monkeypatch.setattr(main, "insert_export", inserted.append)
+    monkeypatch.setattr(main, "create_export_if_idle", lambda job, max_active: inserted.append(job) or True)
     monkeypatch.setattr(main.sqs, "send_message", lambda **kw: inserted.append(kw))
     resp = client.post(
         "/exports",
@@ -188,7 +188,7 @@ def test_tenant_not_enabled_gets_404_and_nothing_is_queued(client, monkeypatch):
 
 def test_enabled_tenant_can_queue(client, monkeypatch):
     inserted = []
-    monkeypatch.setattr(main, "insert_export", inserted.append)
+    monkeypatch.setattr(main, "create_export_if_idle", lambda job, max_active: inserted.append(job) or True)
     monkeypatch.setattr(main.sqs, "send_message", lambda **kw: inserted.append(kw))
     resp = client.post(
         "/exports",
@@ -240,16 +240,16 @@ def test_range_over_limit_rejected(client):
 
 
 def test_second_active_export_rejected(client, monkeypatch):
-    monkeypatch.setattr(main, "count_active_exports", lambda tenant_id: 1)
-    queued = []
-    monkeypatch.setattr(main, "insert_export", queued.append)
+    sent = []
+    monkeypatch.setattr(main, "create_export_if_idle", lambda job, max_active: False)
+    monkeypatch.setattr(main.sqs, "send_message", lambda **kw: sent.append(kw))
     assert _post(client).status_code == 429
-    assert queued == []
+    assert sent == []
 
 
 def test_enqueue_failure_marks_job_failed(client, monkeypatch):
     rows, failed = [], []
-    monkeypatch.setattr(main, "insert_export", rows.append)
+    monkeypatch.setattr(main, "create_export_if_idle", lambda job, max_active: rows.append(job) or True)
     monkeypatch.setattr(main, "mark_failed", failed.append)
 
     def boom(**kw):
