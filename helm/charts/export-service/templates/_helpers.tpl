@@ -25,7 +25,40 @@
       key: SENTRY_DSN
 {{- end }}
 
+{{- /* Cluster DNS. Explicit rather than assumed from a platform policy. */ -}}
+{{- define "export-service.dnsEgress" -}}
+- to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+{{- end }}
+
+{{- /* AWS APIs via the interface endpoints (s3-fips, sqs, sts). Addresses come
+from the Terraform output export_service_endpoint_cidrs. */ -}}
+{{- define "export-service.awsEgress" -}}
+{{- with .Values.networkPolicy.awsEndpointCidrs }}
+- to:
+    {{- range . }}
+    - ipBlock:
+        cidr: {{ . }}
+    {{- end }}
+  ports:
+    - port: 443
+      protocol: TCP
+{{- end }}
+{{- end }}
+
 {{- define "export-service.egress" -}}
+{{ include "export-service.dnsEgress" . }}
+{{- include "export-service.awsEgress" . }}
 - to:
     {{- range .Values.networkPolicy.egressToNamespaces }}
     - namespaceSelector:

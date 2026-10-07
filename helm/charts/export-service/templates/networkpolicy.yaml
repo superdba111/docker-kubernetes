@@ -1,6 +1,10 @@
 # Namespace default-deny is applied by the platform baseline (Platform to
 # confirm it covers the exports namespace). These policies open only what each
-# component needs. AWS APIs are reached via VPC endpoints (platform-egress).
+# component needs, including DNS and the AWS interface endpoints, so they don't
+# depend on any other policy being present.
+{{- if and .Values.exports.enabledTenants (not .Values.networkPolicy.awsEndpointCidrs) }}
+{{- fail "networkPolicy.awsEndpointCidrs is required before enabling exports for any tenant (Terraform output export_service_endpoint_cidrs)" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -57,6 +61,7 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress: []
   egress:
+    {{- include "export-service.dnsEgress" . | nindent 4 }}
     {{- with .Values.networkPolicy.egressCidrs }}
     - to:
         {{- range . }}

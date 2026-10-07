@@ -96,3 +96,6 @@ networkPolicy:
   egressToNamespaces: [sentry]         # both components: in-boundary error tracking
   apiEgressToNamespaces: [portal]      # api only: JWKS for session JWT verification
   egressCidrs: [10.40.0.0/16]   # RDS (port 5432 only)
+  # Interface endpoint addresses for s3-fips, sqs and sts (Terraform output
+  # export_service_endpoint_cidrs). Required before any tenant is enabled.
+  awsEndpointCidrs: []

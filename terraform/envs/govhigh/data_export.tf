@@ -329,22 +329,52 @@ resource "aws_iam_role_policy" "export_worker" {
 #
 # No internet egress, and no CIDR-wide rules (boundary section 5). Every rule
 # names its destination:
-#   - S3: gateway VPC endpoint (managed prefix list)
-#   - SQS / STS / KMS: interface VPC endpoints (their security group)
+#   - AWS APIs: the interface VPC endpoints for the FIPS hosts the SDK resolves
+#     with AWS_USE_FIPS_ENDPOINT=true (checked with botocore 1.34):
+#       s3  -> s3-fips.<region>  (needs the s3-fips interface endpoint; the S3
+#                                  gateway endpoint does not serve the FIPS host)
+#       sqs -> sqs.<region>      (GovCloud's standard SQS endpoint is FIPS)
+#       sts -> sts.<region>      (IRSA web identity + worker job role)
+#     KMS is called by S3/SQS on the service's behalf, not by the pods.
 #   - In-cluster Sentry, portal JWKS, cluster DNS: the EKS cluster security group
 #   - Postgres: the exports RDS cluster's security group
+#
+# The endpoints are looked up, not assumed: if any is missing (or lacks private
+# DNS), terraform plan fails here instead of the service failing at runtime.
 
-data "aws_prefix_list" "s3" {
-  name = "com.amazonaws.${var.region}.s3"
+data "aws_vpc_endpoint" "export_service" {
+  for_each = toset(["s3-fips", "sqs", "sts"])
+
+  vpc_id       = var.vpc_id
+  service_name = "com.amazonaws.${var.region}.${each.key}"
+  state        = "available"
+
+  lifecycle {
+    postcondition {
+      condition     = self.vpc_endpoint_type == "Interface" && self.private_dns_enabled
+      error_message = "The ${each.key} VPC endpoint must be an Interface endpoint with private DNS, so the SDK's FIPS hostname resolves to it from the export pods."
+    }
+  }
 }
 
-# Owned by the platform baseline. TODO(Platform): confirm these two names; the
+locals {
+  export_endpoint_security_group_ids = toset(flatten([
+    for e in data.aws_vpc_endpoint.export_service : tolist(e.security_group_ids)
+  ]))
+  export_endpoint_eni_ids = toset(flatten([
+    for e in data.aws_vpc_endpoint.export_service : tolist(e.network_interface_ids)
+  ]))
+}
+
+# Endpoint ENI addresses, for the Kubernetes NetworkPolicy (which can't
+# reference security groups). Output below; pass to the chart.
+data "aws_network_interface" "export_endpoints" {
+  for_each = local.export_endpoint_eni_ids
+  id       = each.key
+}
+
+# Owned by the platform baseline. TODO(Platform): confirm this name; the
 # convention follows data.aws_security_group.ingress_controller in data.tf.
-data "aws_security_group" "vpc_endpoints" {
-  name   = "foundry-${var.environment}-vpc-endpoints"
-  vpc_id = var.vpc_id
-}
-
 data "aws_security_group" "exports_db" {
   name   = "foundry-${var.environment}-exports-db"
   vpc_id = var.vpc_id
@@ -375,19 +405,11 @@ resource "aws_security_group" "export_service" {
   }
 
   egress {
-    description     = "S3 via gateway VPC endpoint"
+    description     = "S3 (FIPS), SQS, STS via interface VPC endpoints"
     from_port       = 443
     to_port         = 443
     protocol        = "tcp"
-    prefix_list_ids = [data.aws_prefix_list.s3.id]
-  }
-
-  egress {
-    description     = "SQS, STS, KMS via interface VPC endpoints"
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [data.aws_security_group.vpc_endpoints.id]
+    security_groups = local.export_endpoint_security_group_ids
   }
 
   egress {
@@ -445,13 +467,15 @@ resource "aws_security_group_rule" "cluster_from_export_service" {
 }
 
 resource "aws_security_group_rule" "vpc_endpoints_from_export_service" {
+  for_each = local.export_endpoint_security_group_ids
+
   type                     = "ingress"
-  security_group_id        = data.aws_security_group.vpc_endpoints.id
+  security_group_id        = each.key
   source_security_group_id = aws_security_group.export_service.id
   from_port                = 443
   to_port                  = 443
   protocol                 = "tcp"
-  description              = "export-service pods: SQS, STS, KMS"
+  description              = "export-service pods: S3 (FIPS), SQS, STS"
 }
 
 resource "aws_security_group_rule" "exports_db_from_export_service" {
@@ -467,4 +491,9 @@ resource "aws_security_group_rule" "exports_db_from_export_service" {
 output "export_service_security_group_id" {
   description = "Pass to the export-service chart as podSecurityGroup.groupIds."
   value       = aws_security_group.export_service.id
+}
+
+output "export_service_endpoint_cidrs" {
+  description = "Interface endpoint addresses (s3-fips, sqs, sts). Pass to the export-service chart as networkPolicy.awsEndpointCidrs."
+  value       = sort([for n in data.aws_network_interface.export_endpoints : "${n.private_ip}/32"])
 }
