@@ -110,8 +110,11 @@ Evidence to attach before approval:
 
 ### Compensating controls
 Not needed for an FP, but in place or required anyway:
-- **Least-privilege DB credentials:** the app connects as `export_svc` with
-  `sslmode=require`. Credentials come from Secrets Manager (review C2).
+- **DB connection:** the app connects as `export_svc` with `sslmode=require`.
+  **Condition of approval:** the DB password is rotated and served from
+  Secrets Manager via External Secrets (review C2). Today it's still in
+  plaintext in `values-govhigh.yaml`, and this exception isn't valid until
+  that's fixed.
 - **Parameterized queries only:** dynamic SQL is rejected in code review.
 - **Scope of suppression:** a trivy `.trivyignore` entry scoped to **this CVE
   and these two packages** only, with this exception ID in the comment, so a

@@ -24,7 +24,7 @@ access, then hardening.
 ## A. Blocker (boundary): new data flows outside the authorization boundary
 
 ### A1. `terraform/envs/govhigh/data_export.tf:3-7, 62-119`: DR replication to the commercial partition
-**Blocker (boundary)**
+**Blocker (boundary)** · *fixed in this branch*
 
 `dr_exports_bucket_arn` defaults to `arn:aws:s3:::foundry-dr-customer-exports`
 in the **commercial** DR account (`us-east-2`). `aws_s3_bucket_replication_configuration.exports_dr`
@@ -236,7 +236,7 @@ doesn't help:
 ## D. Blocker: export bucket (`data_export.tf:9-60`)
 
 ### D1. `:39-60, :31-37`: bucket readable by anyone who sends the portal's Referer header
-**Blocker**
+**Blocker** · *fixed in this branch*
 
 `Principal: *`, `s3:GetObject` on `bucket/*`, conditioned on `aws:Referer`.
 Referer is a header the client chooses: `curl -H 'Referer: https://portal.foundry-gov.example/x'`
@@ -251,14 +251,14 @@ a thumbnail object) and served through the same tenant-checked presigned URL
 path. Add the `DenyInsecureTransport` statement from `ingest_api.tf`.
 
 ### D2. `:22-29`: SSE-S3 (AES256) instead of the customer-data CMK
-**Blocker**
+**Blocker** · *fixed in this branch*
 
 Boundary §2: "SSE-S3 (`AES256`) is not accepted for customer data." Use
 `aws:kms` with `data.aws_kms_key.customer_data.arn` and `bucket_key_enabled`,
 exactly as `raw_ingest` does.
 
 ### D3. Missing access logging and lifecycle
-**Blocker**
+**Blocker** · *fixed in this branch*
 
 Boundary §2 requires both for customer-data buckets.
 - **Logging:** add `aws_s3_bucket_logging` → `data.aws_s3_bucket.access_logs`,
@@ -272,7 +272,7 @@ Boundary §2 requires both for customer-data buckets.
 ## E. IAM / network (`data_export.tf:151-244`)
 
 ### E1. `:155-167`: IRSA trust allows any namespace and doesn't check `aud`
-**Blocker**
+**Blocker** · *fixed in this branch*
 
 `StringLike` on `system:serviceaccount:*:export-service`, with no `:aud`
 condition. Anyone who can create a ServiceAccount named `export-service` in
@@ -281,7 +281,7 @@ data. Boundary §4 requires both pinned. **Instead:** `StringEquals` `:aud` =
 `sts.amazonaws.com`, `StringEquals` `:sub` = `system:serviceaccount:exports:export-service`.
 
 ### E2. `:181-206`: hardcoded `arn:aws:` ARNs, `kms:*` on `*`, `sqs:*`
-**Blocker**
+**Blocker** · *fixed in this branch*
 
 - **Hardcoded partition:** `arn:aws:s3:::…` (`:185-186, :193`) violates §4.
   It's also **broken in govhigh**: the partition is `aws-us-gov`, so these
@@ -386,43 +386,100 @@ pod is reachable from everywhere in the cluster.
 
 ---
 
-## The fix I implemented (`review/maxwell-li`, commit "fix(export-service): verify session JWTs and scope downloads to tenant")
+## The fix I implemented: one theme, two commits
 
-Changes:
+**Theme: only the owning tenant can read an export, and exports stay inside
+the boundary.** That's B1–B3 (the API) and D1–D3, E1–E2, A1 (the bucket and IAM
+behind it). They have to ship together. Fixing only the API leaves every export
+readable with a faked `Referer` header. Fixing only the bucket leaves any user
+able to request a URL for another tenant's export.
+
+### Commit 1: `fix(export-service): verify session JWTs and scope downloads to tenant`
 - **`app/main.py`:**
   - JWKS-based JWT verification (RS256 pinned; `iss`/`aud`/`exp`/`iat`/`sub`/`tenant_id` required)
-  - 401/503 handling
+  - fails closed: 401 on a bad token, 503 if the JWKS endpoint is unreachable,
+    refuses to start without the JWT settings
   - typed request body (no 500 on missing keys; rejects reversed ranges)
   - `export_id: UUID`
   - TTL default 15 min, capped at 1 h
   - URL no longer logged
 - **`app/db.py`:** `get_export(export_id, tenant_id)` filters by tenant in SQL.
-- **`requirements.txt`:** `PyJWT[crypto]==2.10.1`. This also fixes scan
-  finding CVE-2026-90118 (issuer partial match), which would have mattered as
-  soon as issuer checks were on, and adds the crypto backend RS256 needs.
+- **`requirements.txt`:** `PyJWT[crypto]==2.10.1`. This adds the crypto backend
+  RS256 needs and fixes scan finding CVE-2026-90118 (issuer partial match).
 - **`values.yaml` / `values-govhigh.yaml`:** `JWT_ISSUER`, `JWT_AUDIENCE`,
-  `JWT_JWKS_URL`; TTL 900. The service **fails to start** if these are unset
-  rather than silently accepting tokens. The govhigh JWKS URL is marked
-  TODO for the portal team to confirm.
+  `JWT_JWKS_URL`; TTL 900. The govhigh JWKS URL is marked TODO for the portal
+  team to confirm.
 - **`tests/test_auth.py`:** 14 tests covering owner allowed, other tenant 404,
-  forged signature, `alg=none`, wrong/partial-match issuer, wrong audience,
-  expired token, missing/empty tenant, URL absent from logs. All pass locally.
+  forged signature, `alg=none`, wrong or partial-match issuer, wrong audience,
+  expired token, missing or empty tenant, URL absent from logs.
 
-**Why this one.** It's the only finding that combines all three of these:
-1. It lets **any user read any tenant's CUI today**. B1 and B2 together turn a
-   UUID into a download link.
-2. It **would survive the rest of the cleanup.** Moving to ECR, KMS, or
-   in-boundary Sentry doesn't touch it, and a reviewer could easily approve a
-   cleaned-up PR with it still there.
-3. It's **code, not deletion.** The boundary items (A1–A3) are mostly "remove
-   the line"; the author can do those in an hour. Getting JWT verification right
-   (pinned algorithms, required claims, issuer exact-match, JWKS failure
-   behaviour) is easy to get subtly wrong, so it's where a reviewer adds the
-   most.
+### Commit 2: `fix(govhigh): make customer-exports private and in-boundary; scope export IAM`
+- **D1:** removed the Referer-gated public `GetObject`. All four public access
+  blocks are on, and `DenyInsecureTransport` is added.
+- **D2:** SSE-KMS with `data.aws_kms_key.customer_data` and bucket keys enabled.
+- **D3:** access logging to the central log bucket, and a 14-day lifecycle. Data
+  Products to confirm 14 days against the contract.
+- **A1:** removed the replication to the commercial DR bucket, along with its
+  role and variable.
+- **E1:** trust is now `StringEquals` on `:aud` and on
+  `:sub = system:serviceaccount:exports:export-service`.
+- **E2:** ARNs come from resources (`arn:aws:` no longer appears). KMS is scoped
+  to the customer-data key and the queue key; the missing customer-data grant
+  was the real cause of the staging `AccessDenied`. `sqs:*` is reduced to the
+  five actions used.
 
-It's also on the critical path for the reduced Friday scope in `decision.md`.
-Whatever ships has to have this.
+### How to verify (no AWS account needed)
+```
+pip install -r services/export-service/requirements-dev.txt
+pytest services/export-service                         # 14 passed
+cd terraform/envs/govhigh
+terraform init -backend=false && terraform validate     # Success
+terraform fmt -check                                    # clean
+```
+Before apply, Platform still needs a `terraform plan` against govhigh. It
+confirms the referenced data sources exist and shows the bucket-policy
+replacement and the removal of replication.
 
-I deliberately did **not** change Terraform. I can't run `terraform plan`
-against govhigh, and an unverified IAM/bucket diff is worse than a precise
-review comment. D1–D3 and E1–E2 are mechanical copies of `ingest_api.tf`.
+### Why this one
+1. **Impact today:** the most serious problem in the PR is that **any user
+   (B1+B2), or anyone at all (D1), can read any tenant's CUI**.
+2. **It would survive cleanup:** moving to ECR or in-boundary Sentry doesn't
+   touch it, and a reviewer could approve a tidied PR with it still there.
+3. **It's where review adds the most:** getting JWT verification right (pinned
+   algorithms, required claims, exact issuer match, behaviour when JWKS is down)
+   and finding the real KMS root cause are easy to get subtly wrong. Several of
+   the other fixes are deletions the author can do in an hour.
+4. **It's required anyway:** it's on the critical path for the reduced Friday
+   scope in `decision.md`.
+
+### Deliberately not fixed on this branch (still open, still blocking)
+The exercise asks for one fix, not all of them. These remain open, and the
+**no-ship decision doesn't change** until they're done:
+- **A2, Sentry SaaS:** needs an in-boundary DSN from Secrets Manager and
+  `send_default_pii=False`. Mechanical once Platform provides the secret path.
+- **A3 + C1, CI and Docker Hub:** the workflow rewrite (OIDC, ECR,
+  `pull_request`, gating scan) needs a govhigh IAM role and runner that only
+  Platform can create. The **credential rotation** has to happen today, and
+  isn't a code change.
+- **C2, plaintext DB password:** removing the line is pointless until the
+  password is rotated in RDS and stored in Secrets Manager. Someone with RDS
+  access has to do that.
+- **C3, CODEOWNERS:** an ownership decision I've stated in the review; the
+  author should make the change.
+- **C4, cluster-admin:** the right fix depends on what `migrate` actually does
+  across tenant namespaces, and that code isn't in the PR (G1).
+- **B4 + G1, worker isolation:** the API is now tenant-scoped, but the worker
+  still trusts `tenant_id` from the SQS message and can read all of
+  `raw-ingest`. I can't review or fix code that isn't in the PR. This is the
+  biggest remaining gap in the theme above.
+- **F1–F7, hardening:** listed with exact changes.
+
+### What I'd do next, in order
+1. Rotate `GOVHIGH_DEPLOY_AWS_*`, `DOCKERHUB_TOKEN`, and the RDS password;
+   check CloudTrail.
+2. Review the `worker` and `migrate` code, then add the worker tenant check
+   (B4) and replace cluster-admin (C4).
+3. Rewrite the workflow from `ingest-api.yml` (C1/A3).
+4. Move secrets to ExternalSecrets, including in-boundary Sentry (C2/A2).
+5. Pod hardening and dependency upgrades (F, scan fix-now rows), then rescan
+   the ECR image.
