@@ -1,17 +1,24 @@
 replicaCount: 2
+workerReplicaCount: 2
 
 image:
   repository: docker.io/foundryeng/export-service
   tag: latest
   pullPolicy: Always
 
-serviceAccount:
-  name: export-service
-  roleArn: ""
+# Separate identities: the API must not hold the worker's raw-ingest access.
+serviceAccounts:
+  api:
+    name: export-api
+    roleArn: ""
+  worker:
+    name: export-worker
+    roleArn: ""
 
 env:
   AWS_REGION: us-gov-west-1
-  S3_ENDPOINT_URL: https://s3.us-gov-west-1.amazonaws.com
+  # FIPS endpoints are resolved by the SDK; never override with a non-FIPS URL.
+  AWS_USE_FIPS_ENDPOINT: "true"
   EXPORT_BUCKET: foundry-govhigh-customer-exports
   RAW_BUCKET: foundry-govhigh-raw-ingest
   EXPORT_QUEUE_URL: ""

@@ -27,11 +27,9 @@ sentry_sdk.init(
     traces_sample_rate=1.0,
 )
 
-s3 = boto3.client(
-    "s3",
-    region_name=os.environ["AWS_REGION"],
-    endpoint_url=os.environ.get("S3_ENDPOINT_URL"),
-)
+# Endpoints come from the SDK so AWS_USE_FIPS_ENDPOINT=true selects the FIPS
+# hosts (boundary section 3). Presigned URLs are then also on s3-fips.
+s3 = boto3.client("s3", region_name=os.environ["AWS_REGION"])
 sqs = boto3.client("sqs", region_name=os.environ["AWS_REGION"])
 
 BUCKET = os.environ["EXPORT_BUCKET"]

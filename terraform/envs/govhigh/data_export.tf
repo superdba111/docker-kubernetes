@@ -126,8 +126,22 @@ resource "aws_sqs_queue" "export_jobs" {
 }
 
 # --- IRSA ---
+#
+# The API and the worker get separate service accounts and roles. The API is
+# reachable from the portal and only needs to enqueue jobs and sign download
+# URLs; it must not hold the worker's read access to every tenant's raw data.
 
-data "aws_iam_policy_document" "export_service_trust" {
+locals {
+  export_namespace = "exports"
+  export_service_accounts = {
+    api    = "export-api"
+    worker = "export-worker"
+  }
+}
+
+data "aws_iam_policy_document" "export_trust" {
+  for_each = local.export_service_accounts
+
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
     principals {
@@ -142,39 +156,67 @@ data "aws_iam_policy_document" "export_service_trust" {
     condition {
       test     = "StringEquals"
       variable = "${local.oidc_issuer}:sub"
-      values   = ["system:serviceaccount:exports:export-service"]
+      values   = ["system:serviceaccount:${local.export_namespace}:${each.value}"]
     }
   }
 }
 
-resource "aws_iam_role" "export_service" {
-  name               = "${var.environment}-export-service"
-  assume_role_policy = data.aws_iam_policy_document.export_service_trust.json
+resource "aws_iam_role" "export" {
+  for_each           = local.export_service_accounts
+  name               = "${var.environment}-${each.value}"
+  assume_role_policy = data.aws_iam_policy_document.export_trust[each.key].json
 }
 
-data "aws_iam_policy_document" "export_service" {
+# API: enqueue jobs; sign GET URLs for finished exports (the URL carries the
+# signer's permissions, so it needs GetObject + Decrypt on the export objects).
+data "aws_iam_policy_document" "export_api" {
   statement {
-    sid = "Exports"
-    actions = [
-      "s3:GetObject",
-      "s3:PutObject",
-      "s3:DeleteObject",
-    ]
+    sid       = "SignExportDownloads"
+    actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.exports.arn}/*"]
   }
 
   statement {
-    sid       = "ListExports"
-    actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.exports.arn]
+    sid       = "DecryptExports"
+    actions   = ["kms:Decrypt"]
+    resources = [data.aws_kms_key.customer_data.arn]
   }
 
-  # TODO(DP-2297 follow-up): limit to the job's tenant prefix once the worker
-  # code is in review; see review/review.md B4.
+  statement {
+    sid       = "EnqueueJobs"
+    actions   = ["sqs:SendMessage", "sqs:GetQueueAttributes"]
+    resources = [aws_sqs_queue.export_jobs.arn]
+  }
+
+  statement {
+    sid       = "QueueKey"
+    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+    resources = [aws_kms_key.exports.arn]
+  }
+}
+
+# Worker: read raw objects, write Parquet exports, consume the queue.
+data "aws_iam_policy_document" "export_worker" {
+  # TODO(B4): this is still every tenant's raw data. A static IAM policy can't
+  # follow the tenant of each job; the worker should assume a per-job session
+  # with a session policy limited to raw/<tenant>/* and exports/<tenant>/*.
+  # Needs the worker code (not in this PR) and the raw-ingest key layout.
   statement {
     sid       = "ReadRawIngest"
-    actions   = ["s3:GetObject", "s3:ListBucket"]
-    resources = [aws_s3_bucket.raw_ingest.arn, "${aws_s3_bucket.raw_ingest.arn}/*"]
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.raw_ingest.arn}/*"]
+  }
+
+  statement {
+    sid       = "ListRawIngest"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.raw_ingest.arn]
+  }
+
+  statement {
+    sid       = "WriteExports"
+    actions   = ["s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = ["${aws_s3_bucket.exports.arn}/*"]
   }
 
   # raw-ingest and customer-exports are both SSE-KMS with the customer-data CMK.
@@ -186,15 +228,8 @@ data "aws_iam_policy_document" "export_service" {
   }
 
   statement {
-    sid       = "QueueKey"
-    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
-    resources = [aws_kms_key.exports.arn]
-  }
-
-  statement {
-    sid = "Queue"
+    sid = "ConsumeJobs"
     actions = [
-      "sqs:SendMessage",
       "sqs:ReceiveMessage",
       "sqs:DeleteMessage",
       "sqs:ChangeMessageVisibility",
@@ -202,12 +237,24 @@ data "aws_iam_policy_document" "export_service" {
     ]
     resources = [aws_sqs_queue.export_jobs.arn]
   }
+
+  statement {
+    sid       = "QueueKey"
+    actions   = ["kms:Decrypt"]
+    resources = [aws_kms_key.exports.arn]
+  }
 }
 
-resource "aws_iam_role_policy" "export_service" {
-  name   = "export-service"
-  role   = aws_iam_role.export_service.id
-  policy = data.aws_iam_policy_document.export_service.json
+resource "aws_iam_role_policy" "export_api" {
+  name   = "export-api"
+  role   = aws_iam_role.export["api"].id
+  policy = data.aws_iam_policy_document.export_api.json
+}
+
+resource "aws_iam_role_policy" "export_worker" {
+  name   = "export-worker"
+  role   = aws_iam_role.export["worker"].id
+  policy = data.aws_iam_policy_document.export_worker.json
 }
 
 # --- Network (attached to pods via SecurityGroupPolicy) ---

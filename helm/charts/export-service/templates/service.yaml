@@ -5,6 +5,7 @@ metadata:
 spec:
   selector:
     app.kubernetes.io/name: export-service
+    app.kubernetes.io/component: api
   ports:
     - port: 80
       targetPort: 8080
