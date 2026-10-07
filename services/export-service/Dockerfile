@@ -4,7 +4,11 @@
 # bundles its own libpq (16.x; works with the RDS 17 cluster). The PGDG libpq 17
 # / postgresql-client-17 packages were never used by the app, and pulled from a
 # public repo outside the boundary.
-FROM 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/hardened/python:3.12-fips AS builder
+#
+# Same in-boundary ECR, reached through its FIPS endpoint (CI logs in to this
+# host and passes it in).
+ARG REGISTRY=111122223333.dkr.ecr-fips.us-gov-west-1.amazonaws.com
+FROM ${REGISTRY}/hardened/python:3.12-fips AS builder
 WORKDIR /build
 # Every package is pinned and hash-verified (requirements.txt is generated from
 # requirements.in), and comes only from the approved package mirror.
@@ -28,7 +32,7 @@ RUN --mount=type=secret,id=pip_netrc,target=/root/.netrc,required=false \
         --index-url "$PIP_INDEX_URL" \
         --prefix=/install -r requirements.txt
 
-FROM 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/hardened/python:3.12-fips
+FROM ${REGISTRY}/hardened/python:3.12-fips
 COPY --from=builder /install /usr/local
 COPY app/ /app
 WORKDIR /app

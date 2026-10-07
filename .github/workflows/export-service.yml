@@ -37,6 +37,14 @@ jobs:
     permissions:
       contents: read
       id-token: write   # GitHub OIDC -> AWS
+    env:
+      # Boundary section 3: FIPS endpoints in transit for CI's AWS calls too.
+      # Set here rather than relying on runner config. Honoured by the AWS CLI
+      # (ECR API) and the JS SDK inside configure-aws-credentials (STS).
+      AWS_USE_FIPS_ENDPOINT: "true"
+      # The env var doesn't cover docker, so the registry host (base-image pull
+      # and push) is the ECR FIPS endpoint explicitly.
+      ECR_REGISTRY: 111122223333.dkr.ecr-fips.us-gov-west-1.amazonaws.com
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -50,7 +58,7 @@ jobs:
 
       - name: Log in to ECR (hardened base pull + push)
         run: |
-          aws ecr get-login-password | docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
       - name: Build
         env:
@@ -64,6 +72,7 @@ jobs:
           # If the mirror needs auth, Platform adds:
           #   --secret id=pip_netrc,src=<netrc file written from a short-lived token>
           docker build \
+            --build-arg REGISTRY="$ECR_REGISTRY" \
             --build-arg PIP_INDEX_URL="$PIP_INDEX_URL" \
             -t export-service:${GITHUB_SHA} services/export-service
 
@@ -73,6 +82,5 @@ jobs:
 
       - name: Push
         run: |
-          REG=111122223333.dkr.ecr.us-gov-west-1.amazonaws.com
-          docker tag export-service:${GITHUB_SHA} $REG/foundry/export-service:${GITHUB_SHA}
-          docker push $REG/foundry/export-service:${GITHUB_SHA}
+          docker tag export-service:${GITHUB_SHA} "$ECR_REGISTRY/foundry/export-service:${GITHUB_SHA}"
+          docker push "$ECR_REGISTRY/foundry/export-service:${GITHUB_SHA}"
