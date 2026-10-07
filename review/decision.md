@@ -63,11 +63,14 @@ What's left before it can be enabled:
    - **Terraform:** run `terraform plan`.
    - **Namespace:** confirm the `exports` namespace has default-deny.
    - **Rescan:** the scan gate must be clean (fixable Critical/High).
-   - **Inputs:** approved pip mirror; names of the endpoint and RDS security
-     groups.
-4. **FIPS for DB TLS (Wed).** The Postgres driver bundles its own OpenSSL.
-   Either Platform confirms libpq in the hardened image and we switch drivers,
-   or Security + the Platform EM approve RA-2026-015 (drafted).
+   - **Inputs:** approved pip mirror (the build now fails without one); names
+     of the endpoint and RDS security groups; review of the ingress rules the
+     branch adds to baseline security groups; confirm security groups for pods
+     (`ENABLE_POD_ENI`) so the pod security group actually applies.
+4. **FIPS for DB TLS (Wed), a production gate.** The Postgres driver bundles its
+   own OpenSSL. Either Platform confirms libpq in the hardened image and we
+   switch drivers, or Security + the Platform EM approve RA-2026-015. The draft
+   grants nothing until both sign.
 5. **Portal team (Wed):** confirm the in-cluster JWKS service and the token
    issuer.
 6. **Delivery path.** Streaming through the portal is already the default, so

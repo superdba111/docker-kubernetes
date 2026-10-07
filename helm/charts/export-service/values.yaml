@@ -9,8 +9,10 @@ exports:
 
 # How customers receive exports. "stream" goes through the portal, the only
 # approved internet-facing path. "presigned" (direct S3 download) needs the
-# ISSO's confirmation that it is covered by the SSP (review A4); the chart
-# refuses to render it without a reference to that approval.
+# ISSO's confirmation that it is covered by the SSP (review A4). The chart
+# refuses to render it without issoApprovalRef, but that is only a breadcrumb:
+# the control is the Platform/Security review required on helm/ (CODEOWNERS),
+# where the reviewer checks the referenced approval exists.
 download:
   mode: stream
   issoApprovalRef: ""

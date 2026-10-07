@@ -4,7 +4,7 @@ Reviewer: @foundry/security-review (Maxwell Li) · Reviewed at PR head `fcbf06d`
 Rules applied: `docs/authorization-boundary.md`, `docs/security-review-policy.md`.
 Pattern baseline: `ingest-api` (SR-2026-031).
 
-**Outcome: Changes requested.** 4 × Blocker (boundary), 15 × Blocker, 12 × Pre-prod,
+**Outcome: Changes requested.** 4 × Blocker (boundary), 15 × Blocker, 14 × Pre-prod,
 4 × Follow-up, 2 × Nit, 9 × No action. See `decision.md` for what can ship Friday.
 
 Line numbers refer to the PR head (`fcbf06d`), not to my fix commit.
@@ -85,8 +85,11 @@ isn't covered, the fallback is to stream the download through the portal.
 
 **Status (done in this branch, `d0fd221`):** streaming through the portal is
 now the **default** (`download.mode: stream`). Presigned S3 links are off. The
-chart refuses to render `presigned` without `download.issoApprovalRef`, so the
-ISSO's decision is enforced in config, not just written down.
+chart refuses to render `presigned` without `download.issoApprovalRef`. That
+check is **presence-only**, a breadcrumb, not proof of approval. The real
+control is review: `helm/` is owned by Platform and Security Review (C3), so
+flipping the mode is a reviewed change, and the reviewer checks the referenced
+approval exists.
 
 ---
 
@@ -143,43 +146,31 @@ The worker takes `tenant_id` from the SQS message, so the API is now the only
 thing keeping tenants apart. Anyone who can send to the queue, and `sqs:*` (E2)
 lets the role do exactly that, can export any tenant's data.
 
-**Status:** the IAM side is done (`1f5770a`). The worker code is still missing,
-and that is the main reason I can't approve enabling this. What changed:
-- **Worker's own role:** now has **no access to customer data**. It can only
-  consume the queue and assume `export-job`.
+**Why the flag alone isn't enough:** the flag decides *whether* exports run.
+Once a tenant is on, the worker role still reached every tenant. A static IAM
+policy can't follow "the tenant of the current job", so access has to be scoped
+per job.
+
+**Status: IAM side done (`1f5770a`); worker side not reviewable (G1).**
+- **Worker's own role:** no access to customer data. It can only consume the
+  queue and assume `export-job`.
 - **`export-job` role:** the session must carry exactly one tag, `tenant_id`.
   S3 access is limited through `${aws:PrincipalTag/tenant_id}` to
-  `raw-ingest/<tenant>/*` and `customer-exports/<tenant>/*`, and KMS can only
-  be used through S3.
-- **Why this matters with the flag:** the flag decides *whether* exports run.
-  This role decides *what a running worker can reach*. A bug in one job can no
-  longer touch another tenant's data.
+  `raw-ingest/<tenant>/*` and `customer-exports/<tenant>/*`; KMS only through
+  S3. I used session tags rather than an inline session policy, so the role's
+  own policy enforces the prefix and worker code can't widen it.
+- **What the worker code must do (to verify at G1 review):** read the job row
+  by `id` and use *its* `tenant_id`, never the SQS message's; do all S3 work
+  with the `export-job` credentials; re-assume for jobs over 1 hour (the
+  role-chaining limit).
 
-**Limits I'm stating rather than hiding:**
-- **Tag choice:** the worker chooses the tag. It must take `tenant_id` from the
-  DB job row, not the SQS message. A fully compromised worker could still tag
-  any tenant. Closing that needs a broker that issues the per-job session
-  (e.g. the API, which has the verified JWT); that's a design follow-up.
-- **Key layout:** this assumes `raw-ingest` keys are `<tenant_id>/...`. The
-  ingest code is in another repo; Ingest team to confirm.
-- **Session length:** role chaining caps sessions at 1 hour, so long jobs must
-  re-assume.
-
-**Original recommendation (now implemented on the IAM side):** a static IAM
-policy can't follow "the tenant of the current job". The mechanism that can:
-1. **Validate the job:** the worker reads the job row from the DB by `id` and
-   uses *that* `tenant_id`, never the one in the message.
-2. **Scope a session to the tenant:** for each job, the worker calls
-   `sts:AssumeRole` (role chaining from its IRSA role), tagging the session
-   with the tenant, and uses only those credentials to process the job. I used
-   session tags with `aws:PrincipalTag` rather than an inline session policy:
-   the role's own policy then enforces the prefix, so worker code can't widen
-   it.
-3. **Prerequisite:** confirm that `raw-ingest` keys are tenant-prefixed (the
-   ingest code is in another repo).
-
-The worker code isn't in this PR (G1), so the worker side can't be written or
-reviewed here.
+**Limits, stated rather than hidden:**
+- **A compromised worker can still pick any tenant's tag.** The job row helps
+  against bugs, not against a compromised worker. Closing it needs a broker
+  that issues the per-job session from the verified request (e.g. the API).
+  That's a design follow-up, and the reason the worker review is a hard gate.
+- **Key layout:** assumes `raw-ingest` keys are `<tenant_id>/...`. The ingest
+  code is in another repo; Ingest team to confirm.
 
 ### B5. `values-govhigh.yaml`, NetworkPolicy: JWKS fetched from the public portal hostname
 **Pre-prod** · *fixed in this branch* (`d0fd221`) · found in third-pass review
@@ -190,6 +181,21 @@ In govhigh the key fetch would be blocked, and **every request would fail
 closed with 503**. That's safe, but broken. The URL now points at the in-cluster
 portal service, and the API alone gets egress to the `portal` namespace on 443.
 Portal team to confirm the service name and the token issuer.
+
+### B6. `app/main.py` download: the API trusts the DB row's `s3_key`
+**Pre-prod** · *fixed in this branch* (`49af428`) · found in fifth-pass review
+
+The lookup is tenant-scoped, but the API then streams or signs whatever
+`s3_key` the row holds, and its role can read the whole exports bucket. A worker
+bug or a tampered row would hand one tenant another tenant's file.
+
+**Fix (done):**
+- **Key check:** the key must be under the caller's `<tenant_id>/` prefix;
+  otherwise 404, plus an error log.
+- **Strict tenant format:** `tenant_id` must match
+  `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. It's used as an S3 prefix and an IAM
+  session tag, so no `/`, wildcards or lookalikes (`tenant-a` vs `tenant-ab`).
+- **Tests:** rogue key, lookalike prefixes, malformed tenants.
 
 ---
 
@@ -385,7 +391,17 @@ allow-listed. Once A2 is fixed, nothing legitimate needs the internet.
   DNS), and the exports RDS SG.
 
 Platform to confirm the two SG names I assumed (`foundry-govhigh-vpc-endpoints`,
-`foundry-govhigh-exports-db`). The Kubernetes NetworkPolicy still uses an
+`foundry-govhigh-exports-db`).
+
+**E6, Pre-prod, found in fifth-pass review, fixed in `030593b`:** none of this
+governed anything, because nothing attached the SG to the pods. Now:
+- **Attachment:** a `SecurityGroupPolicy` in the chart selects the api,
+  worker and migrate pods. Rendering fails if a tenant is enabled without it.
+- **Matching ingress rules:** SG-to-SG rules need both sides, so the cluster,
+  endpoint and RDS SGs get ingress from the export SG. I didn't add the cluster
+  SG to the pods, because that would bring its allow-all egress.
+- **Probes:** ingress from the cluster SG on 8080 for kubelet probes.
+- **Platform to confirm** `ENABLE_POD_ENI` on the VPC CNI. The Kubernetes NetworkPolicy still uses an
 `ipBlock` for RDS, because NetworkPolicy can't reference AWS security groups;
 the pod SG is the precise control.
 
@@ -430,7 +446,7 @@ tenant-scoped per-job role (B4).
 | F3 ✅ | `values.yaml:36`, `deployment.yaml`, `Dockerfile` | Empty `securityContext`, no `USER`, so the pod runs as root with a writable root filesystem and all capabilities | Copy `ingest-api`: `runAsNonRoot`, `runAsUser: 10001`, seccomp `RuntimeDefault`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem`, drop ALL, `/tmp` emptyDir |
 | F4 ✅ | `values.yaml:4-6` | `tag: latest`, `pullPolicy: Always`, so you can't tell what's running and can't roll back | `tag: ""` + `required` in the template, set to the git SHA by CI; `IfNotPresent` |
 | F5 ✅ | `values.yaml:19`, `main.py` | `LOG_LEVEL: DEBUG` in govhigh: boto/urllib3 debug output includes signed request details | `INFO` |
-| F6 ✅ | `requirements*.txt`, `Dockerfile:5` | No hash pinning (`--require-hashes`), unlike the reference, and no defined package source | `requirements.in` → hash-locked `requirements.txt` (`uv pip compile --generate-hashes`, linux/py3.12); `pip --require-hashes --only-binary=:all:`; index from `PIP_INDEX_URL` build arg. **Platform to name the approved mirror** (`vars.GOVHIGH_PIP_INDEX_URL`) |
+| F6 ✅ | `requirements*.txt`, `Dockerfile:5` | No hash pinning (`--require-hashes`), unlike the reference, and no defined package source | `requirements.in` → hash-locked `requirements.txt` (`uv pip compile --generate-hashes`, linux/py3.12); `pip --require-hashes --only-binary=:all:`; index from `PIP_INDEX_URL`, **mandatory** (build fails if unset or if it carries credentials; pip config and extra indexes ignored; mirror auth only via a BuildKit secret, `5cba6d7`). **Platform to name the approved mirror** (`vars.GOVHIGH_PIP_INDEX_URL`) |
 | F7 ✅ | `serviceaccount.yaml` | No `automountServiceAccountToken: false` on the SA | Match `ingest-api` |
 
 ---
@@ -447,13 +463,24 @@ tenant-scoped per-job role (B4).
   govhigh, and all testing happened in the **commercial** staging account. That
   says little about govhigh behaviour, as E2's `arn:aws:` shows. Platform runs
   the plan once A–E are addressed.
-- **G3. Unbounded exports:** there's no limit on export size or date range per
-  request and no per-tenant concurrency limit. One request for "12 months" from
-  every user is a cost and DoS risk. Suggest a max range and one active export
-  per tenant.
+- **G3. Unbounded exports:** there was no limit on date range and no per-tenant
+  concurrency limit, a cost and DoS risk. *Mostly fixed (`49af428`):*
+  - **Range:** at most 366 days.
+  - **Concurrency:** one active export per tenant (429).
+  - **Enqueue failure:** marks the job failed (503) instead of leaving it
+    `queued`.
+
+  **Still open:**
+  - **Race:** the concurrency check can race. It needs a partial unique index
+    in the (absent) migrations.
+  - **Size:** no cap on the output file yet.
+  - **Duplicate requests:** no `Idempotency-Key`, so a double-click can still
+    create two requests; the second gets 429.
 - **G4. Audit logging:** the access log line should be an audit event (who,
   which tenant, which export, when, from where) sent to the in-boundary audit
   stream. It's fine as `log.info` for now.
+- **G5. Weak DLQ:** the DLQ has no alarm and uses default retention. Add a
+  CloudWatch alarm on DLQ depth.
 - **G6 (Pre-prod, raised in third-pass review). psycopg[binary] bundles its own
   OpenSSL.** The wheel ships `libpq`, `libssl` and `libcrypto` (verified
   locally), so DB TLS doesn't use the hardened image's FIPS-validated OpenSSL.
@@ -469,8 +496,6 @@ tenant-scoped per-job role (B4).
   - **Approved exception:** drafted as **RA-2026-015** in
     `review/exceptions/RA-2026-015-psycopg-openssl.md`. It applies to
     `ingest-api` too.
-- **G5. Weak DLQ:** the DLQ has no alarm and uses default retention. Add a
-  CloudWatch alarm on DLQ depth.
 
 ## H. Nit
 
@@ -540,6 +565,9 @@ fixed in-repo, mostly by copying `ingest-api`. One commit per theme:
 | `1f5770a` | B4 (IAM) | Worker role has no data access; per-job `export-job` role scoped by `tenant_id` session tag |
 | `0ed306f` | F6 | Hash-locked requirements; `--require-hashes --only-binary=:all:`; package index from a build arg |
 | `dd0fff4` | G6 | psycopg 3.1.18 → 3.2.3 (bundled OpenSSL 1.1 EOL → 3); RA-2026-015 drafted for the FIPS gap |
+| `5cba6d7` | F6 | Package mirror mandatory; no credentials in build args (BuildKit secret instead) |
+| `030593b` | E6 | `SecurityGroupPolicy` attaches the SG; matching ingress on destination SGs; probe ingress; migrate pods labelled + NetworkPolicy |
+| `49af428` | B6, G3 | S3 key must be under the tenant prefix; strict `tenant_id` format; stream closes S3 body; range/concurrency limits; enqueue-failure handling; 32 tests |
 
 **One behaviour change the author must confirm (C4).** The migrator no longer
 seeds `export-config` ConfigMaps into tenant namespaces. That was the only
@@ -550,7 +578,7 @@ reviewed by Security. Until then, the export service shouldn't depend on it.
 ### How to verify (no AWS account needed)
 ```
 python3.12 -m venv .venv && .venv/bin/pip install --require-hashes -r services/export-service/requirements-dev.txt
-.venv/bin/pytest services/export-service               # 18 passed
+.venv/bin/pytest services/export-service               # 32 passed
 helm lint helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml --set image.tag=x
 helm template t helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml   # fails: image.tag is required (intended)
 cd terraform/envs/govhigh
@@ -575,13 +603,13 @@ the worker runs 0 replicas, migrations are off, and delivery is streaming only.
 | 1 | **G1/B4: the `worker` and `migrate` code**, reviewed, with the worker taking `tenant_id` from the DB job row and doing all S3 work with `export-job` credentials | Code isn't in the PR. IAM side is done | Data Products |
 | 2 | **Revoke** `GOVHIGH_DEPLOY_AWS_*` and `DOCKERHUB_TOKEN`; check CloudTrail for fork-PR runs | Operational, today | Platform + Security |
 | 3 | **Rotate** the RDS password (still in git history); populate `govhigh/export-service/db-password` and the in-boundary Sentry DSN | Operational | Data Products + Platform |
-| 4 | **G6:** FIPS for DB TLS. Remediate, or approve RA-2026-015 | Needs Platform's hardened-image answer and two approvers | Platform + Security + Platform EM |
+| 4 | **G6: FIPS for DB TLS. A production gate.** RA-2026-015 is a draft and grants nothing until both approvers sign; otherwise remediate (system libpq on the hardened image) | Needs Platform's hardened-image answer and two approvers | Platform + Security + Platform EM |
 | 5 | Confirm `raw-ingest` keys are `<tenant_id>/...` (B4 assumption) | ingest code is in another repo | Ingest team |
-| 6 | Platform inputs: OIDC role `gha-ecr-push-export-service`, ECR repo, approved pip mirror, SG names (E3), runner isolation (C5), `exports` namespace default-deny | Needs Platform | Platform |
+| 6 | Platform inputs: OIDC role `gha-ecr-push-export-service`, ECR repo, approved pip mirror (build fails without it), SG names (E3), review of the ingress rules added to baseline SGs and `ENABLE_POD_ENI` (E6), runner isolation (C5), `exports` namespace default-deny | Needs Platform | Platform |
 | 7 | Portal: confirm in-cluster JWKS service name and token issuer (B5) | Portal team | Portal team |
 | 8 | `terraform plan`, first image build, trivy rescan on the hardened base | Needs #6 | Platform |
 | 9 | **A4:** only if presigned links are wanted, ISSO approval reference | Streaming works without it | ISSO |
-| 10 | Scan Mediums/Lows within SLA; G3–G5 | Lower priority | Data Products |
+| 10 | Concurrency partial unique index + export size cap (G3); scan Mediums/Lows within SLA; G4–G5 | Index belongs in the absent migrations | Data Products |
 
 ### What I'd do next, in order
 Items 2 and 3 today. Then 1, the real gate, alongside 4–7. Then 8, and enable
