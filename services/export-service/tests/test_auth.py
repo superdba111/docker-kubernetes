@@ -54,6 +54,8 @@ def _fake_get_export(export_id, tenant_id):
 def client(monkeypatch):
     monkeypatch.setattr(main, "_jwks", _FakeJWKS())
     monkeypatch.setattr(main, "get_export", _fake_get_export)
+    monkeypatch.setattr(main, "count_active_exports", lambda tenant_id: 0)
+    monkeypatch.setattr(main, "mark_failed", lambda export_id: None)
     return TestClient(main.app)
 
 
@@ -67,10 +69,14 @@ def _download(client, token, export_id=EXPORT_A):
 class _FakeBody:
     def __init__(self, data):
         self._data = data
+        self.closed = False
 
     def iter_chunks(self, size):
         for i in range(0, len(self._data), size):
             yield self._data[i:i + size]
+
+    def close(self):
+        self.closed = True
 
 
 @pytest.fixture
@@ -78,8 +84,9 @@ def fake_s3_object(monkeypatch):
     fetched = []
 
     def get_object(Bucket, Key):
-        fetched.append(Key)
-        return {"Body": _FakeBody(b"PAR1-data"), "ContentLength": 9}
+        body = _FakeBody(b"PAR1-data")
+        fetched.append((Key, body))
+        return {"Body": body, "ContentLength": 9}
 
     monkeypatch.setattr(main.s3, "get_object", get_object)
     return fetched
@@ -92,7 +99,8 @@ def test_default_mode_streams_through_api(client, fake_s3_object):
     assert resp.content == b"PAR1-data"
     assert "attachment" in resp.headers["content-disposition"]
     assert resp.headers["cache-control"] == "no-store"
-    assert fake_s3_object == ["tenant-a/x.parquet"]
+    assert [k for k, _ in fake_s3_object] == ["tenant-a/x.parquet"]
+    assert fake_s3_object[0][1].closed
 
 
 def test_stream_mode_other_tenant_gets_404_without_reading_s3(client, fake_s3_object):
@@ -189,3 +197,63 @@ def test_enabled_tenant_can_queue(client, monkeypatch):
     )
     assert resp.status_code == 200
     assert inserted[0]["tenant_id"] == "tenant-a"
+
+
+def test_stream_closes_s3_body_when_client_stops_early():
+    body = _FakeBody(b"x" * (3 * main.STREAM_CHUNK_BYTES))
+    gen = main._stream(body)
+    next(gen)          # client reads one chunk, then disconnects
+    gen.close()
+    assert body.closed
+
+
+def test_key_outside_tenant_prefix_is_refused(client, monkeypatch, fake_s3_object, caplog):
+    def rogue(export_id, tenant_id):
+        return {"id": export_id, "tenant_id": tenant_id, "status": "done",
+                "s3_key": "tenant-b/their-export.parquet"}
+    monkeypatch.setattr(main, "get_export", rogue)
+    assert _download(client, _token()).status_code == 404
+    assert fake_s3_object == []
+    assert "outside the tenant prefix" in caplog.text
+
+
+@pytest.mark.parametrize("key", ["tenant-a/", "tenant-ab/x.parquet", "x/tenant-a/y", None])
+def test_owned_key_rejects_lookalikes(key):
+    assert not main._owned_key(key, "tenant-a")
+
+
+@pytest.mark.parametrize("tenant_id", ["a/b", "*", "../x", "t" * 65, "tenant a"])
+def test_malformed_tenant_id_rejected(client, tenant_id):
+    assert _download(client, _token(tenant_id=tenant_id)).status_code == 401
+
+
+def _post(client, start="2026-01-01", end="2026-02-01", tenant_id="tenant-a"):
+    return client.post(
+        "/exports",
+        json={"start": start, "end": end},
+        headers={"Authorization": f"Bearer {_token(tenant_id=tenant_id)}"},
+    )
+
+
+def test_range_over_limit_rejected(client):
+    assert _post(client, start="2025-01-01", end="2026-06-01").status_code == 422
+
+
+def test_second_active_export_rejected(client, monkeypatch):
+    monkeypatch.setattr(main, "count_active_exports", lambda tenant_id: 1)
+    queued = []
+    monkeypatch.setattr(main, "insert_export", queued.append)
+    assert _post(client).status_code == 429
+    assert queued == []
+
+
+def test_enqueue_failure_marks_job_failed(client, monkeypatch):
+    rows, failed = [], []
+    monkeypatch.setattr(main, "insert_export", rows.append)
+    monkeypatch.setattr(main, "mark_failed", failed.append)
+
+    def boom(**kw):
+        raise RuntimeError("sqs down")
+    monkeypatch.setattr(main.sqs, "send_message", boom)
+    assert _post(client).status_code == 503
+    assert failed == [rows[0]["export_id"]]

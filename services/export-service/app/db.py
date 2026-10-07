@@ -41,3 +41,23 @@ def get_export(export_id: str, tenant_id: str) -> dict | None:
     if row is None:
         return None
     return {"id": row[0], "tenant_id": row[1], "status": row[2], "s3_key": row[3]}
+
+
+def count_active_exports(tenant_id: str) -> int:
+    """Jobs for tenant_id that are still queued or running."""
+    with _db().cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM exports.jobs "
+            "WHERE tenant_id = %s AND status IN ('queued', 'running')",
+            (tenant_id,),
+        )
+        return cur.fetchone()[0]
+
+
+def mark_failed(export_id: str) -> None:
+    with _db().cursor() as cur:
+        cur.execute(
+            "UPDATE exports.jobs SET status = 'failed' WHERE id = %s AND status = 'queued'",
+            (export_id,),
+        )
+    _db().commit()

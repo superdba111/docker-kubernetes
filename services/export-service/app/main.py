@@ -8,6 +8,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import uuid
 
 import boto3
@@ -17,7 +18,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, model_validator
 
-from db import get_export, insert_export
+from db import count_active_exports, get_export, insert_export, mark_failed
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("export-service")
@@ -55,6 +56,14 @@ DOWNLOAD_MODE = os.environ.get("DOWNLOAD_MODE", "stream")
 if DOWNLOAD_MODE not in ("stream", "presigned"):
     raise RuntimeError(f"DOWNLOAD_MODE must be 'stream' or 'presigned', not {DOWNLOAD_MODE!r}")
 STREAM_CHUNK_BYTES = 1024 * 1024
+
+# Abuse/cost limits per request and per tenant (review G3).
+MAX_RANGE_DAYS = int(os.environ.get("EXPORT_MAX_RANGE_DAYS", "366"))
+MAX_ACTIVE_PER_TENANT = int(os.environ.get("EXPORT_MAX_ACTIVE_PER_TENANT", "1"))
+
+# Tenant IDs are used as S3 key prefixes and IAM session tags, so they must be
+# unambiguous: no "/", no wildcards, bounded length.
+TENANT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
 def _required_env(name: str) -> str:
@@ -102,7 +111,8 @@ def current_user(authorization: str = Header(...)) -> dict:
     except jwt.PyJWTError as exc:
         log.info("rejected token: %s", type(exc).__name__)
         raise HTTPException(status_code=401)
-    if not isinstance(claims["tenant_id"], str) or not claims["tenant_id"]:
+    tenant_id = claims["tenant_id"]
+    if not isinstance(tenant_id, str) or not TENANT_ID_RE.fullmatch(tenant_id):
         raise HTTPException(status_code=401)
     return claims
 
@@ -121,7 +131,25 @@ class ExportRequest(BaseModel):
     def _ordered(self) -> "ExportRequest":
         if self.end < self.start:
             raise ValueError("end must not be before start")
+        if (self.end - self.start).days > MAX_RANGE_DAYS:
+            raise ValueError(f"date range must be at most {MAX_RANGE_DAYS} days")
         return self
+
+
+def _owned_key(key: str | None, tenant_id: str) -> bool:
+    """Exports live under "<tenant_id>/". Never trust the DB row's key alone:
+    the API role can read the whole exports bucket."""
+    prefix = f"{tenant_id}/"
+    return isinstance(key, str) and key.startswith(prefix) and len(key) > len(prefix)
+
+
+def _stream(body):
+    """Yield the S3 object in chunks and always release the connection, including
+    when the client disconnects mid-download."""
+    try:
+        yield from body.iter_chunks(STREAM_CHUNK_BYTES)
+    finally:
+        body.close()
 
 
 @app.get("/healthz")
@@ -131,6 +159,9 @@ def healthz() -> dict:
 
 @app.post("/exports")
 def create_export(body: ExportRequest, user: dict = Depends(enabled_user)) -> dict:
+    if count_active_exports(user["tenant_id"]) >= MAX_ACTIVE_PER_TENANT:
+        raise HTTPException(status_code=429, detail="an export is already in progress")
+
     export_id = str(uuid.uuid4())
     job = {
         "export_id": export_id,
@@ -140,7 +171,15 @@ def create_export(body: ExportRequest, user: dict = Depends(enabled_user)) -> di
         "end": body.end.isoformat(),
     }
     insert_export(job)
-    sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=json.dumps(job))
+    # The DB row is the source of truth; the worker must ignore messages whose
+    # job isn't 'queued'. If the send fails, fail the row so it doesn't sit in
+    # 'queued' forever and block the tenant's concurrency slot.
+    try:
+        sqs.send_message(QueueUrl=QUEUE_URL, MessageBody=json.dumps(job))
+    except Exception:
+        log.exception("failed to enqueue export %s", export_id)
+        mark_failed(export_id)
+        raise HTTPException(status_code=503, detail="could not queue export, try again")
     log.info("queued export %s for tenant %s", export_id, user["tenant_id"])
     return {"export_id": export_id}
 
@@ -152,6 +191,11 @@ def download(export_id: uuid.UUID, user: dict = Depends(enabled_user)):
     export = get_export(str(export_id), user["tenant_id"])
     if export is None or export["status"] != "done":
         raise HTTPException(status_code=404)
+    if not _owned_key(export["s3_key"], user["tenant_id"]):
+        # The row belongs to this tenant but points outside its prefix: a bug
+        # or tampering. Refuse, and make it visible.
+        log.error("export %s for tenant %s has a key outside the tenant prefix", export_id, user["tenant_id"])
+        raise HTTPException(status_code=404)
 
     if DOWNLOAD_MODE == "stream":
         obj = s3.get_object(Bucket=BUCKET, Key=export["s3_key"])
@@ -160,7 +204,7 @@ def download(export_id: uuid.UUID, user: dict = Depends(enabled_user)):
             export_id, user["tenant_id"], user["sub"], obj["ContentLength"],
         )
         return StreamingResponse(
-            obj["Body"].iter_chunks(STREAM_CHUNK_BYTES),
+            _stream(obj["Body"]),
             media_type="application/vnd.apache.parquet",
             headers={
                 "Content-Disposition": f'attachment; filename="export-{export_id}.parquet"',
