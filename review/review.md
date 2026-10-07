@@ -429,7 +429,7 @@ DNS lookup and AWS call from the api and worker would fail.
   addresses, which Terraform outputs as `export_service_endpoint_cidrs`.
 - **Render gate:** the chart refuses to enable a tenant without those
   addresses.
-- **Keeping them in sync (seventh-pass review, `5a5f715`):** endpoint addresses change if an
+- **Keeping them in sync (seventh-pass review, `14daebe`):** endpoint addresses change if an
   endpoint or its subnets are recreated, and a stale list silently breaks AWS
   calls. `helm/charts/export-service/scripts/tf-values.py` turns
   `terraform output -json` into the values file, so nobody copies addresses by
@@ -621,7 +621,7 @@ fixed in-repo, mostly by copying `ingest-api`. One commit per theme:
 | `49af428` | B6, G3 | S3 key must be under the tenant prefix; strict `tenant_id` format; stream closes S3 body; range/concurrency limits; enqueue-failure handling; 32 tests |
 | `dbf566a` | E7, E8 | Interface endpoints (s3-fips, sqs, sts) looked up, plan fails if missing / no private DNS; SG rules target their SGs; NetworkPolicy allows DNS + endpoint addresses, render gate |
 | `59436f8` | B7, G3 | Connection pool; per-tenant advisory lock around check + insert; real-Postgres concurrency tests (opt-in) |
-| `5a5f715` | E7 | `scripts/tf-values.py`: Terraform outputs → Helm values, plus `--check` drift detection |
+| `14daebe` | E7 | `scripts/tf-values.py`: Terraform outputs → Helm values, plus `--check` drift detection |
 
 **One behaviour change the author must confirm (C4).** The migrator no longer
 seeds `export-config` ConfigMaps into tenant namespaces. That was the only
