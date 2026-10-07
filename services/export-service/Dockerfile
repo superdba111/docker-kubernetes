@@ -1,16 +1,15 @@
-FROM python:3.12-slim AS builder
-RUN apt-get update && apt-get install -y build-essential libpq-dev
+# Hardened, FIPS-enabled base image maintained by Platform (in-boundary ECR).
+#
+# No apt installs: the app talks to Postgres through psycopg[binary], which
+# bundles its own libpq (16.x; works with the RDS 17 cluster). The PGDG libpq 17
+# / postgresql-client-17 packages were never used by the app, and pulled from a
+# public repo outside the boundary.
+FROM 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/hardened/python:3.12-fips AS builder
 WORKDIR /build
 COPY requirements.txt .
-RUN pip install --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-FROM python:3.12-slim
-# libpq 17 from the PostgreSQL (PGDG) apt repo — Debian 12 only ships libpq 15,
-# which lacks the protocol features our RDS 17 cluster needs.
-RUN apt-get update && apt-get install -y curl gnupg ca-certificates \
- && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
- && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
- && apt-get update && apt-get install -y libpq5 postgresql-client-17
+FROM 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/hardened/python:3.12-fips
 COPY --from=builder /install /usr/local
 COPY app/ /app
 WORKDIR /app

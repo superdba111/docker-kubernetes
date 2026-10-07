@@ -258,6 +258,18 @@ resource "aws_iam_role_policy" "export_worker" {
 }
 
 # --- Network (attached to pods via SecurityGroupPolicy) ---
+#
+# No internet egress (boundary section 5). AWS APIs are reached through VPC
+# endpoints: S3 via the gateway endpoint (managed prefix list), SQS/STS/KMS via
+# interface endpoints inside the VPC. In-cluster Sentry is also in the VPC.
+
+data "aws_vpc" "this" {
+  id = var.vpc_id
+}
+
+data "aws_prefix_list" "s3" {
+  name = "com.amazonaws.${var.region}.s3"
+}
 
 resource "aws_security_group" "export_service" {
   name   = "${var.environment}-export-service"
@@ -271,11 +283,19 @@ resource "aws_security_group" "export_service" {
   }
 
   egress {
-    description = "S3, SQS, Sentry"
+    description     = "S3 via gateway VPC endpoint"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_prefix_list.s3.id]
+  }
+
+  egress {
+    description = "Interface VPC endpoints (SQS, STS, KMS) and in-cluster Sentry"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [data.aws_vpc.this.cidr_block]
   }
 
   egress {
