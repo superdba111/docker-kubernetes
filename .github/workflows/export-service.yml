@@ -53,9 +53,18 @@ jobs:
           aws ecr get-login-password | docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com
 
       - name: Build
+        env:
+          # Approved in-boundary package mirror (no credentials in the URL).
+          PIP_INDEX_URL: ${{ vars.GOVHIGH_PIP_INDEX_URL }}
         run: |
+          if [ -z "$PIP_INDEX_URL" ]; then
+            echo "::error::vars.GOVHIGH_PIP_INDEX_URL (approved package mirror) is not set"
+            exit 1
+          fi
+          # If the mirror needs auth, Platform adds:
+          #   --secret id=pip_netrc,src=<netrc file written from a short-lived token>
           docker build \
-            --build-arg PIP_INDEX_URL="${{ vars.GOVHIGH_PIP_INDEX_URL }}" \
+            --build-arg PIP_INDEX_URL="$PIP_INDEX_URL" \
             -t export-service:${GITHUB_SHA} services/export-service
 
       - name: Scan (blocks on fixable Critical/High)
