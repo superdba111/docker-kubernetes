@@ -1,10 +1,8 @@
 # Customer bulk data export — see docs/design/data-export.md
 
-variable "dr_exports_bucket_arn" {
-  type        = string
-  description = "Existing DR bucket in the commercial DR account (us-east-2)"
-  default     = "arn:aws:s3:::foundry-dr-customer-exports"
-}
+# Exports are derived from raw-ingest and can be regenerated, so they are not
+# replicated. Any future DR copy must stay in GovCloud (444455556666 /
+# us-gov-east-1); see authorization-boundary.md section 1.
 
 # --- Bucket ---
 
@@ -23,33 +21,65 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "exports" {
   bucket = aws_s3_bucket.exports.id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = data.aws_kms_key.customer_data.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+# Downloads go through tenant-checked presigned URLs only; nothing is public.
+resource "aws_s3_bucket_public_access_block" "exports" {
+  bucket                  = aws_s3_bucket.exports.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_logging" "exports" {
+  bucket        = aws_s3_bucket.exports.id
+  target_bucket = data.aws_s3_bucket.access_logs.id
+  target_prefix = "customer-exports/"
+}
+
+# Exports are regenerable copies of raw-ingest data; keep them only as long as
+# the customer needs to pull them.
+resource "aws_s3_bucket_lifecycle_configuration" "exports" {
+  bucket = aws_s3_bucket.exports.id
+  rule {
+    id     = "retention"
+    status = "Enabled"
+    filter {}
+    expiration {
+      days = 14
+    }
+    noncurrent_version_expiration {
+      noncurrent_days = 1
+    }
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
     }
   }
 }
 
-resource "aws_s3_bucket_public_access_block" "exports" {
-  bucket                  = aws_s3_bucket.exports.id
-  block_public_acls       = true
-  ignore_public_acls      = true
-  block_public_policy     = false # required for portal preview policy below
-  restrict_public_buckets = false
-}
-
 data "aws_iam_policy_document" "exports_bucket" {
   statement {
-    sid       = "PortalPreviews"
-    effect    = "Allow"
-    actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.exports.arn}/*"]
+    sid     = "DenyInsecureTransport"
+    effect  = "Deny"
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.exports.arn,
+      "${aws_s3_bucket.exports.arn}/*",
+    ]
     principals {
       type        = "*"
       identifiers = ["*"]
     }
     condition {
-      test     = "StringLike"
-      variable = "aws:Referer"
-      values   = ["https://portal.foundry-gov.example/*"]
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
     }
   }
 }
@@ -57,63 +87,8 @@ data "aws_iam_policy_document" "exports_bucket" {
 resource "aws_s3_bucket_policy" "exports" {
   bucket = aws_s3_bucket.exports.id
   policy = data.aws_iam_policy_document.exports_bucket.json
-}
 
-# --- DR replication ---
-
-data "aws_iam_policy_document" "replication_trust" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["s3.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "exports_replication" {
-  name               = "${var.environment}-exports-replication"
-  assume_role_policy = data.aws_iam_policy_document.replication_trust.json
-}
-
-data "aws_iam_policy_document" "exports_replication" {
-  statement {
-    actions   = ["s3:GetReplicationConfiguration", "s3:ListBucket"]
-    resources = [aws_s3_bucket.exports.arn]
-  }
-  statement {
-    actions   = ["s3:GetObjectVersionForReplication", "s3:GetObjectVersionAcl"]
-    resources = ["${aws_s3_bucket.exports.arn}/*"]
-  }
-  statement {
-    actions   = ["s3:ReplicateObject", "s3:ReplicateDelete"]
-    resources = ["${var.dr_exports_bucket_arn}/*"]
-  }
-}
-
-resource "aws_iam_role_policy" "exports_replication" {
-  name   = "exports-replication"
-  role   = aws_iam_role.exports_replication.id
-  policy = data.aws_iam_policy_document.exports_replication.json
-}
-
-resource "aws_s3_bucket_replication_configuration" "exports_dr" {
-  depends_on = [aws_s3_bucket_versioning.exports]
-  role       = aws_iam_role.exports_replication.arn
-  bucket     = aws_s3_bucket.exports.id
-
-  rule {
-    id     = "dr-copy"
-    status = "Enabled"
-    filter {}
-    delete_marker_replication {
-      status = "Enabled"
-    }
-    destination {
-      bucket        = var.dr_exports_bucket_arn
-      storage_class = "STANDARD_IA"
-    }
-  }
+  depends_on = [aws_s3_bucket_public_access_block.exports]
 }
 
 # --- Job queue ---
@@ -160,9 +135,14 @@ data "aws_iam_policy_document" "export_service_trust" {
       identifiers = [local.oidc_provider]
     }
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
+      variable = "${local.oidc_issuer}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
       variable = "${local.oidc_issuer}:sub"
-      values   = ["system:serviceaccount:*:export-service"]
+      values   = ["system:serviceaccount:exports:export-service"]
     }
   }
 }
@@ -179,31 +159,48 @@ data "aws_iam_policy_document" "export_service" {
       "s3:GetObject",
       "s3:PutObject",
       "s3:DeleteObject",
-      "s3:ListBucket",
     ]
-    resources = [
-      "arn:aws:s3:::foundry-govhigh-customer-exports",
-      "arn:aws:s3:::foundry-govhigh-customer-exports/*",
-    ]
+    resources = ["${aws_s3_bucket.exports.arn}/*"]
   }
 
+  statement {
+    sid       = "ListExports"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.exports.arn]
+  }
+
+  # TODO(DP-2297 follow-up): limit to the job's tenant prefix once the worker
+  # code is in review; see review/review.md B4.
   statement {
     sid       = "ReadRawIngest"
     actions   = ["s3:GetObject", "s3:ListBucket"]
-    resources = ["arn:aws:s3:::foundry-govhigh-raw-ingest", "arn:aws:s3:::foundry-govhigh-raw-ingest/*"]
+    resources = [aws_s3_bucket.raw_ingest.arn, "${aws_s3_bucket.raw_ingest.arn}/*"]
+  }
+
+  # raw-ingest and customer-exports are both SSE-KMS with the customer-data CMK.
+  # Missing this grant is what caused the staging AccessDenied, not the scope.
+  statement {
+    sid       = "CustomerDataKey"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+    resources = [data.aws_kms_key.customer_data.arn]
   }
 
   statement {
-    sid     = "Kms"
-    actions = ["kms:Decrypt", "kms:GenerateDataKey", "kms:Encrypt"]
-    # TODO(DP-2297): scope down — scoped key ARN was denied in staging
-    resources = ["*"]
+    sid       = "QueueKey"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+    resources = [aws_kms_key.exports.arn]
   }
 
   statement {
-    sid       = "Queue"
-    actions   = ["sqs:*"]
-    resources = [aws_sqs_queue.export_jobs.arn, aws_sqs_queue.export_jobs_dlq.arn]
+    sid = "Queue"
+    actions = [
+      "sqs:SendMessage",
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:ChangeMessageVisibility",
+      "sqs:GetQueueAttributes",
+    ]
+    resources = [aws_sqs_queue.export_jobs.arn]
   }
 }
 
