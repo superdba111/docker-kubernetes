@@ -120,6 +120,14 @@ copy or version is still reported.
 - **If `psql` is needed again** (e.g. for `migrate`): install it from an
   in-boundary mirror and re-raise this exception with fresh evidence.
 
+### POA&M lifecycle
+**Owner: Security Review. Status: not registered; draft only.** Before any
+suppression or reliance on this exception, register RA-2026-014 on the POA&M
+with both approvals, evidence, remediation owner and expiry; attach the entry
+reference here. Security Review tracks expiry and records closure evidence
+after the replacement image inventory and scan meet the remediation plan.
+No registration or approval is asserted by this document.
+
 ### Approvals
 Policy §4: both are required.
 - Security Reviewer:

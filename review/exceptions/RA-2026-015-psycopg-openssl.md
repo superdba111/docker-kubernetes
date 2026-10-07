@@ -71,6 +71,14 @@ week, remediate instead of accepting.
 3. **Ingest team:** same change for `ingest-api`. Due 2 weeks after step 1.
 4. Close this exception when both images pass the new check.
 
+## POA&M lifecycle
+**Owner: Security Review. Status: not registered; draft only.** Before any
+production reliance, register RA-2026-015 on the POA&M with both approvals,
+image evidence, remediation owners and expiry; attach the entry reference
+here. Security Review tracks the remediation dates and expiry, and records
+closure evidence when both services meet the remediation plan. An expired or
+unapproved exception grants no permission to continue using the affected path.
+
 ## Approvals
 - Security Reviewer:
 - Platform Engineering Manager:

@@ -5,15 +5,18 @@ numbers refer to it) · Rules: `docs/authorization-boundary.md`,
 `docs/security-review-policy.md` · Baseline: `ingest-api` (SR-2026-031)
 
 **Outcome: Changes requested.**
-- **Counts:** 4 × Blocker (boundary), 15 × Blocker, 14 × Pre-prod,
+- **Counts:** 5 × Blocker (boundary), 15 × Blocker, 14 × Pre-prod,
   12 × Follow-up, 2 × Nit, 8 × No action.
 - **Friday:** see `decision.md`.
 
-**Status at merge** (policy §2: Blockers are fixed before merge). Every Blocker
-is fixed in `review/maxwell-li`, with these qualifications:
+**Status at merge** (policy §2: Blockers are fixed before merge). Technical
+Blockers are fixed in `review/maxwell-li`, with these qualifications:
+- **A5:** unresolved boundary Blocker, including for a disabled merge. Platform
+  and Security must complete the boundary-change process below; the feature
+  flag does not disable Terraform bucket creation.
 - **A4:** resolved. Presigned S3 isn't part of what merges.
 - **B4:** IAM fixed. The worker-code check is Pre-prod (G1), because the code
-  isn't in the PR. Merging disabled is safe: the worker runs 0 replicas, and
+  isn't in the PR. When disabled, the worker runs 0 replicas, and
   no role in the merged state can read `raw-ingest` on its own.
 - **C1 / C2:** fixed in code. **Credential revocation and password rotation
   are merge gates**, because merging puts the old password into `main`'s
@@ -59,6 +62,19 @@ presigned URL makes the S3 endpoint the download path, which may or may not
 be covered by the SSP.
 **Instead:** stream through the portal. Presigned stays off unless the ISSO
 confirms coverage.
+
+### A5. `terraform/envs/govhigh/data_export.tf`: new customer-data storage location
+The new `customer-exports` bucket stores CUI. Boundary §6 explicitly treats
+new customer-data storage locations as significant changes, even inside
+GovCloud. Removing commercial replication does not resolve this requirement.
+**Instead:** Platform + Security open a boundary change record and provide
+advance notice to the FedRAMP partner and authorizing officials before
+deployment, satisfying the required lead time (typically 10+ business days).
+Treat Friday as unavailable unless existing authorization explicitly covers
+this storage and flow, with evidence confirmed through the boundary-change
+process. An ISSO interpretation or risk acceptance alone cannot waive §6.
+This applies to the one-off fallback too. Do not merge with A5 unresolved or
+apply the new storage while the process is incomplete.
 
 ## Blocker
 
