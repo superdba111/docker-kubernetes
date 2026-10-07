@@ -15,5 +15,6 @@ COPY --from=builder /install /usr/local
 COPY app/ /app
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
+USER 10001
 EXPOSE 8080
 CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8080", "main:app"]

@@ -11,7 +11,8 @@
 
 /services/ingest-api/     @foundry/ingest @foundry/platform
 
-# Data Products — export feature
-/services/export-service/                  @foundry/data-products
-/helm/charts/export-service/               @foundry/data-products
-/.github/workflows/export-service.yml      @foundry/data-products
+# Data Products — export feature. Last match wins, so the required reviewers
+# from the broader paths above are repeated here (security-review-policy.md 1).
+/services/export-service/                  @foundry/data-products @foundry/security-review
+/helm/charts/export-service/               @foundry/data-products @foundry/platform @foundry/security-review
+/.github/workflows/export-service.yml      @foundry/data-products @foundry/platform @foundry/security-review

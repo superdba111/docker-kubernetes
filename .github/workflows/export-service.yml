@@ -1,42 +1,49 @@
 name: export-service
 
+# Fork PRs run with `pull_request`: no secrets, no AWS, no push. Only pushes to
+# main (trusted code) assume the ECR push role via GitHub OIDC.
 on:
-  # pull_request_target so PRs from contractor forks can build preview images
-  pull_request_target:
+  pull_request:
     paths: ["services/export-service/**"]
   push:
     branches: [main]
     paths: ["services/export-service/**"]
 
+permissions:
+  contents: read
+  id-token: write   # GitHub OIDC -> AWS
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, govhigh-builder]
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.GOVHIGH_DEPLOY_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.GOVHIGH_DEPLOY_AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-gov-west-1
-
-      - uses: docker/login-action@v3
-        with:
-          username: foundryeng
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Test
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r services/export-service/requirements-dev.txt
+          .venv/bin/pytest services/export-service
 
       - name: Build
         run: |
-          pip install -r services/export-service/requirements-dev.txt
-          pytest services/export-service
-          docker build -t foundryeng/export-service:latest services/export-service
+          docker build -t export-service:${GITHUB_SHA} services/export-service
 
-      - name: Scan
+      - name: Scan (blocks on fixable Critical/High)
         run: |
-          trivy image --severity CRITICAL,HIGH foundryeng/export-service:latest || true
+          trivy image --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH export-service:${GITHUB_SHA}
 
-      - name: Push
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        if: github.event_name == 'push'
+        with:
+          # Platform to create, trusted for repo:<org>/foundry-platform:ref:refs/heads/main only.
+          role-to-assume: arn:aws-us-gov:iam::111122223333:role/gha-ecr-push-export-service
+          aws-region: us-gov-west-1
+
+      - name: Push (main only)
+        if: github.event_name == 'push'
         run: |
-          docker push foundryeng/export-service:latest
+          REG=111122223333.dkr.ecr.us-gov-west-1.amazonaws.com
+          aws ecr get-login-password | docker login --username AWS --password-stdin $REG
+          docker tag export-service:${GITHUB_SHA} $REG/foundry/export-service:${GITHUB_SHA}
+          docker push $REG/foundry/export-service:${GITHUB_SHA}
