@@ -28,14 +28,21 @@ env:
   JWT_AUDIENCE: export-service
   JWT_JWKS_URL: ""
   LOG_LEVEL: DEBUG
-  SENTRY_DSN: https://3f9c2a7be41d4c0e9b1f2d6a8c5e7f10@o448812.ingest.sentry.io/5523117
   SENTRY_ENVIRONMENT: govhigh
+  SENTRY_TRACES_SAMPLE_RATE: "0.05"
 
 database:
   host: ""
   name: exports
   user: export_svc
-  password: ""
+
+# Pulled from AWS Secrets Manager by External Secrets Operator.
+externalSecret:
+  secretStoreRef: govhigh-secrets-manager
+  refreshInterval: 1h
+  keys:
+    SENTRY_DSN: govhigh/export-service/sentry-dsn    # self-hosted, sentry.govhigh.internal
+    DB_PASSWORD: govhigh/export-service/db-password  # rotate: the old value was committed
 
 migrations:
   enabled: true

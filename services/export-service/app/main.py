@@ -23,8 +23,11 @@ log = logging.getLogger("export-service")
 sentry_sdk.init(
     dsn=os.environ.get("SENTRY_DSN"),
     environment=os.environ.get("SENTRY_ENVIRONMENT"),
-    send_default_pii=True,
-    traces_sample_rate=1.0,
+    # In-boundary Sentry only (DSN from Secrets Manager). Error payloads count
+    # as CUI, so keep request bodies, headers and user data out of them.
+    send_default_pii=False,
+    max_request_body_size="never",
+    traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0")),
 )
 
 # Endpoints come from the SDK so AWS_USE_FIPS_ENDPOINT=true selects the FIPS

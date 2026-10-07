@@ -12,4 +12,3 @@ env:
 
 database:
   host: exports.cluster-xxxx.us-gov-west-1.rds.amazonaws.com
-  password: "Xp0rt-svc!2026-govhigh"

@@ -12,6 +12,11 @@
 - name: DB_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ .Release.Name }}-db
+      name: {{ .Release.Name }}-secrets
       key: DB_PASSWORD
+- name: SENTRY_DSN
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Release.Name }}-secrets
+      key: SENTRY_DSN
 {{- end }}

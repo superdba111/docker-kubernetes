@@ -53,5 +53,8 @@ spec:
             - name: DB_USER
               value: {{ .Values.database.user | quote }}
             - name: DB_PASSWORD
-              value: {{ .Values.database.password | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: DB_PASSWORD
 {{- end }}
