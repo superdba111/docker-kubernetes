@@ -9,15 +9,21 @@ numbers refer to it) · Rules: `docs/authorization-boundary.md`,
   12 × Follow-up, 2 × Nit, 8 × No action.
 - **Friday:** see `decision.md`.
 
-**Status at merge** (policy §2: Blockers are fixed before merge). Technical
-Blockers are fixed in `review/maxwell-li`, with these qualifications:
-- **A5:** unresolved boundary Blocker, including for a disabled merge. Platform
-  and Security must complete the boundary-change process below; the feature
-  flag does not disable Terraform bucket creation.
-- **A4:** resolved. Presigned S3 isn't part of what merges.
-- **B4:** IAM fixed. The worker-code check is Pre-prod (G1), because the code
-  isn't in the PR. When disabled, the worker runs 0 replicas, and
-  no role in the merged state can read `raw-ingest` on its own.
+**Current scope: PR A, a non-deploying foundation.** The original findings below
+remain the review of `feature/data-export`; they are not a claim that the
+deferred architecture has been deployed or approved. Application fixes and
+tests remain active. Production Terraform, chart and publishing proposals are
+text-only references in `review/deferred/`, not deployable changes in PR A.
+
+**Status at merge** (policy §2: Blockers are fixed or removed from scope):
+- **A5:** removed from PR A by removing active export Terraform, not by a feature
+  flag or policy waiver. It remains a boundary Blocker for PR B.
+- **A4 / B4 / C4:** no export workload, public download path, job-role grant or
+  migration hook ships in PR A. Proposed IAM and missing worker/migration code
+  must be reviewed in PR B. A compromised worker could still choose tenant tags
+  in that proposal; the base role's lack of direct S3 permission is not isolation.
+- **Deployment:** CI tests only. Platform must confirm no existing export
+  state/release or separate automation deploys the retained application source.
 - **C1 / C2:** fixed in code. **Credential revocation and password rotation
   are merge gates**, because merging puts the old password into `main`'s
   history.
@@ -73,8 +79,9 @@ deployment, satisfying the required lead time (typically 10+ business days).
 Treat Friday as unavailable unless existing authorization explicitly covers
 this storage and flow, with evidence confirmed through the boundary-change
 process. An ISSO interpretation or risk acceptance alone cannot waive §6.
-This applies to the one-off fallback too. Do not merge with A5 unresolved or
-apply the new storage while the process is incomplete.
+This applies to the one-off fallback too. PR A excludes this change entirely;
+do not merge PR B with A5 unresolved or apply the new storage while the process
+is incomplete. See `review/deferred/README.md` for the split and handoff.
 
 ## Blocker
 
@@ -190,7 +197,9 @@ exports-bucket read and `SendMessage` only.
 
 ## Pre-prod
 
-May merge disabled; must be fixed before any tenant is enabled.
+These are PR B production gates. PR A contains source/tests only and no
+installable export chart or production publishing. Paths in the findings below
+refer to the original PR or the text-only proposal under `review/deferred/`.
 
 | # | Where | Finding | Instead |
 |---|---|---|---|
@@ -260,8 +269,10 @@ in the bucket and IAM behind it (`70fce0a`, `42eec9f`). Why this one:
 The halves must ship together: fixing only the API leaves the Referer hole,
 and fixing only the bucket leaves cross-tenant URLs.
 
-**Beyond the one fix.** I also fixed the other in-repo findings, one theme per
-commit, so each can be reviewed, split into its own PR, or dropped:
+**Beyond the one fix.** Earlier commits developed broader fixes. Production
+assets are now deferred as text-only PR B proposals, while PR A retains the
+application fixes and a test-only workflow. The table records that history,
+not active deployment scope:
 
 | Theme | Findings | Commits |
 |---|---|---|
@@ -285,7 +296,7 @@ ConfigMaps.
 ```
 python3.12 -m venv .venv && .venv/bin/pip install --require-hashes -r services/export-service/requirements-dev.txt
 .venv/bin/pytest services/export-service     # 33 passed, 4 skipped; with EXPORT_TEST_PG=1 + a disposable Postgres the 4 run
-helm lint helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml --set image.tag=x --set worker.jobRoleArn=x
+python3 -m unittest discover -s services/export-service/tests -p test_delivery_scope.py
 cd terraform/envs/govhigh && terraform init -backend=false && terraform validate && terraform fmt -check
 ```
 **Not verified:**
@@ -293,4 +304,6 @@ cd terraform/envs/govhigh && terraform init -backend=false && terraform validate
   rescan, no deploy.
 - **Hosts:** the `dkr.ecr-fips` registry host is unconfirmed.
 
-Platform's first build closes these (decision, enable gate 2).
+Platform's PR B build must establish those results. PR A does not build or
+publish an image. The archived chart cannot be linted/installed from active
+Helm paths; restoring it requires the separately reviewed PR B.

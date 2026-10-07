@@ -7,6 +7,7 @@
 /.github/workflows/       @foundry/platform @foundry/security-review
 /docs/                    @foundry/security-review
 /CODEOWNERS               @foundry/security-review
+/review/deferred/         @foundry/platform @foundry/security-review
 **/Dockerfile             @foundry/platform @foundry/security-review
 
 /services/ingest-api/     @foundry/ingest @foundry/platform

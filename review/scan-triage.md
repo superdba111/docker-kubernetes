@@ -1,5 +1,11 @@
 # Scan triage: export-service
 
+**Current scope:** PR A is source/tests only and does not build or publish an
+image. The earlier hardened-image, Terraform and chart proposals are text-only
+PR B references in `review/deferred/`. Part 2 records proposed remediation,
+not an active publishing pipeline or production approval. Final-image checks
+and the scan gate are mandatory before PR B launches.
+
 Source: `ci-artifacts/export-service-scan.txt` (trivy). **First detected
 2026-09-28**, so the policy §3 deadlines are:
 - **Critical/High:** 2026-10-28

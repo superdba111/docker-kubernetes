@@ -1,5 +1,9 @@
 # Risk Acceptance / Exception Request
 
+**Scope after split:** deferred PR B only. PR A has no installable chart,
+publishing pipeline or runnable operator export. The conditions below describe
+a future reviewed procedure, not a fallback executable from the current PR.
+
 **Status: DRAFT. Used only if worker review slips (decision.md, fallback).**
 It grants nothing until both approvers sign.
 

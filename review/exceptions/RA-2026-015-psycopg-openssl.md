@@ -1,5 +1,9 @@
 # Risk Acceptance / Exception Request
 
+**Scope after split:** deferred PR B only. PR A does not deploy the application
+or use DB TLS in production. This draft must not be read as approval to restore
+deployment assets or as a merge prerequisite for source-only PR A.
+
 **Status: DRAFT. Not approved.** Raised so the decision is explicit (review G6).
 No tenant is enabled while this is neither approved nor remediated.
 
