@@ -429,6 +429,13 @@ DNS lookup and AWS call from the api and worker would fail.
   addresses, which Terraform outputs as `export_service_endpoint_cidrs`.
 - **Render gate:** the chart refuses to enable a tenant without those
   addresses.
+- **Keeping them in sync (seventh-pass review, `5a5f715`):** endpoint addresses change if an
+  endpoint or its subnets are recreated, and a stale list silently breaks AWS
+  calls. `helm/charts/export-service/scripts/tf-values.py` turns
+  `terraform output -json` into the values file, so nobody copies addresses by
+  hand. `--check` compares against `helm get values` and exits 1 on drift.
+  **Platform to wire both into the deploy job**; the repo has no Helm deploy
+  pipeline today.
 
 ### E8. FIPS S3 calls had no network path
 **Pre-prod** · *fixed in this branch* (`dbf566a`) · found in sixth-pass review
@@ -614,6 +621,7 @@ fixed in-repo, mostly by copying `ingest-api`. One commit per theme:
 | `49af428` | B6, G3 | S3 key must be under the tenant prefix; strict `tenant_id` format; stream closes S3 body; range/concurrency limits; enqueue-failure handling; 32 tests |
 | `dbf566a` | E7, E8 | Interface endpoints (s3-fips, sqs, sts) looked up, plan fails if missing / no private DNS; SG rules target their SGs; NetworkPolicy allows DNS + endpoint addresses, render gate |
 | `59436f8` | B7, G3 | Connection pool; per-tenant advisory lock around check + insert; real-Postgres concurrency tests (opt-in) |
+| `5a5f715` | E7 | `scripts/tf-values.py`: Terraform outputs → Helm values, plus `--check` drift detection |
 
 **One behaviour change the author must confirm (C4).** The migrator no longer
 seeds `export-config` ConfigMaps into tenant namespaces. That was the only
@@ -629,7 +637,7 @@ python3.12 -m venv .venv && .venv/bin/pip install --require-hashes -r services/e
 helm lint helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml --set image.tag=x
 helm template t helm/charts/export-service -f helm/charts/export-service/values-govhigh.yaml   # fails: image.tag is required (intended)
 cd terraform/envs/govhigh
-terraform init -backend=false && terraform validate && terraform fmt -check
+terraform init -backend=false && terraform validate && terraform fmt -check   # init downloads the AWS provider; no credentials needed
 ```
 I also checked FIPS endpoint resolution with botocore 1.34 and
 `AWS_USE_FIPS_ENDPOINT=true`. S3 and presigned URLs resolve to
@@ -654,7 +662,7 @@ the worker runs 0 replicas, migrations are off, and delivery is streaming only.
 | 5 | Confirm `raw-ingest` keys are `<tenant_id>/...` (B4 assumption) | ingest code is in another repo | Ingest team |
 | 6 | Platform inputs: OIDC role `gha-ecr-push-export-service`, ECR repo, approved pip mirror (build fails without it), **`s3-fips`/`sqs`/`sts` interface endpoints with private DNS (plan fails without them, E8)**, exports RDS SG name (E3), review of the ingress rules added to baseline SGs and `ENABLE_POD_ENI` (E6), runner isolation (C5), `exports` namespace default-deny | Needs Platform | Platform |
 | 7 | Portal: confirm in-cluster JWKS service name and token issuer (B5) | Portal team | Portal team |
-| 8 | `terraform plan`, first image build, trivy rescan on the hardened base | Needs #6 | Platform |
+| 8 | `terraform plan`, first image build, trivy rescan on the hardened base; wire `scripts/tf-values.py` (generate + `--check`) into the deploy job | Needs #6 | Platform |
 | 9 | **A4:** only if presigned links are wanted, ISSO approval reference | Streaming works without it | ISSO |
 | 10 | Export size cap and idempotency key (G3); scan Mediums/Lows within SLA; G4–G5 | Lower priority | Data Products |
 
