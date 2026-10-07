@@ -7,7 +7,7 @@ No tenant is enabled while this is neither approved nor remediated.
 |--------------------------|-------|
 | Exception ID             | RA-2026-015 |
 | Type                     | **OR** (Operational requirement) |
-| Finding(s)               | Review finding G6: `psycopg[binary]` (psycopg-binary 3.2.3) bundles its own `libpq`, `libssl` and `libcrypto`, so Postgres TLS doesn't use the hardened image's FIPS-validated OpenSSL. Components: `export-service` (api, worker, migrate); also `ingest-api` (same dependency) |
+| Finding(s)               | Review finding G6: `psycopg[binary]` (psycopg-binary 3.2.5) bundles its own `libpq`, `libssl` and `libcrypto`, so Postgres TLS doesn't use the hardened image's FIPS-validated OpenSSL. Components: `export-service` (api, worker, migrate); also `ingest-api` (same dependency) |
 | Original severity        | HIGH (boundary §3: FIPS-validated modules for data in transit) |
 | Adjusted severity (if RA)| n/a |
 | Environment(s)           | govhigh (`111122223333`, us-gov-west-1) |
@@ -24,17 +24,18 @@ OpenSSL, not by the FIPS-validated module in
 
 ## Justification / Evidence
 - **Evidence:**
-  - **Bundled libpq is what runs:** in a local install of
-    `psycopg[binary]==3.2.3`, `psycopg.pq.__impl__ == "binary"` and
-    `psycopg.pq.version() == 170000`.
-  - **Linux wheel contents** (the one the image installs):
-    `psycopg_binary.libs/` contains `libpq-….so.5.17`, `libssl-….so.3` and
-    `libcrypto-….so.3`. That's a supported OpenSSL 3, but not the
-    FIPS-validated build in the hardened image.
-  - **Version history:** the PR's original pin, 3.1.18, bundled **OpenSSL 1.1**
-    (end-of-life since September 2023). Bumping to 3.2.3 (`ingest-api`'s
-    version) fixed the end-of-life part. The FIPS part is what this exception
-    covers.
+  - **Bundled libpq is what runs:** with `psycopg[binary]==3.2.5`,
+    `psycopg.pq.__impl__ == "binary"`.
+  - **Linux wheel contents** (the hash-locked manylinux wheel the image
+    installs): `psycopg_binary.libs/` contains libpq 17.4 (`PQlibVersion`
+    = 170004), `libssl.so.3` and `libcrypto.so.3` (OpenSSL 3.4.1). That's a
+    supported OpenSSL, but not the FIPS-validated module in the hardened image.
+  - **Version history:** the PR's pin, 3.1.18, bundled OpenSSL 1.1.1w
+    (end-of-life) and libpq 16.0.
+  - **Out of scope here:** the bundled libpq's CVE-2026-90011 exposure
+    (16.0 and 17.0 were affected) is a separate vulnerability, fixed by the
+    bump to 3.2.5 and checked by `tests/test_dependencies.py`. This exception
+    covers only the FIPS gap.
   - **To attach before approval:** the same check run inside the built ECR image.
 - **Why it can't be fixed by this PR alone:** the fix is to use libpq linked
   against the hardened image's OpenSSL, either with `psycopg` (pure Python,
@@ -55,8 +56,9 @@ week, remediate instead of accepting.
   **Condition:** Platform confirms `rds.force_ssl=1` on the exports cluster.
 - **Data at rest:** RDS and all export data are encrypted with the
   customer-data CMK (FIPS-validated AWS KMS).
-- **Credentials:** the DB password comes from Secrets Manager, and has been
-  rotated after the git-history exposure (review C2). **Condition** of approval.
+- **Credentials:** the branch serves the DB password from Secrets Manager.
+  **Condition of approval:** it has been rotated since the git-history
+  exposure (review C2).
 - **Scope:** the DB holds job metadata (tenant ID, date range, status, S3 key),
   not exported line data.
 
