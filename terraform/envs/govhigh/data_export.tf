@@ -195,38 +195,10 @@ data "aws_iam_policy_document" "export_api" {
   }
 }
 
-# Worker: read raw objects, write Parquet exports, consume the queue.
+# Worker: consume the queue and nothing else directly. It has NO access to
+# customer data. For each job it assumes the export-job role, tagging the
+# session with the job's tenant, and processes the job with those credentials.
 data "aws_iam_policy_document" "export_worker" {
-  # TODO(B4): this is still every tenant's raw data. A static IAM policy can't
-  # follow the tenant of each job; the worker should assume a per-job session
-  # with a session policy limited to raw/<tenant>/* and exports/<tenant>/*.
-  # Needs the worker code (not in this PR) and the raw-ingest key layout.
-  statement {
-    sid       = "ReadRawIngest"
-    actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.raw_ingest.arn}/*"]
-  }
-
-  statement {
-    sid       = "ListRawIngest"
-    actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.raw_ingest.arn]
-  }
-
-  statement {
-    sid       = "WriteExports"
-    actions   = ["s3:PutObject", "s3:AbortMultipartUpload"]
-    resources = ["${aws_s3_bucket.exports.arn}/*"]
-  }
-
-  # raw-ingest and customer-exports are both SSE-KMS with the customer-data CMK.
-  # Missing this grant is what caused the staging AccessDenied, not the scope.
-  statement {
-    sid       = "CustomerDataKey"
-    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
-    resources = [data.aws_kms_key.customer_data.arn]
-  }
-
   statement {
     sid = "ConsumeJobs"
     actions = [
@@ -243,6 +215,97 @@ data "aws_iam_policy_document" "export_worker" {
     actions   = ["kms:Decrypt"]
     resources = [aws_kms_key.exports.arn]
   }
+
+  statement {
+    sid       = "AssumeTenantScopedJobRole"
+    actions   = ["sts:AssumeRole", "sts:TagSession"]
+    resources = [aws_iam_role.export_job.arn]
+  }
+}
+
+# --- Per-job, tenant-scoped role (review B4) ---
+#
+# The session must carry exactly one tag, tenant_id, and every S3 permission is
+# limited to that tenant's prefix through ${aws:PrincipalTag/tenant_id}.
+# A bug in the worker can then only touch the job's tenant.
+#
+# Limits, recorded in review.md:
+#   - Assumes raw-ingest keys are "<tenant_id>/..." (ingest-api is in another
+#     repo; Ingest team to confirm). Exports are written as "<tenant_id>/...".
+#   - The worker chooses the tag. It must take tenant_id from the DB job row,
+#     not the SQS message. A fully compromised worker could still tag any
+#     tenant; closing that needs a broker that issues the session per job.
+#   - Role chaining caps sessions at 1 hour; longer jobs re-assume.
+
+data "aws_iam_policy_document" "export_job_trust" {
+  statement {
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_role.export["worker"].arn]
+    }
+    condition {
+      test     = "StringLike"
+      variable = "aws:RequestTag/tenant_id"
+      values   = ["?*"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "aws:TagKeys"
+      values   = ["tenant_id"]
+    }
+  }
+}
+
+resource "aws_iam_role" "export_job" {
+  name                 = "${var.environment}-export-job"
+  assume_role_policy   = data.aws_iam_policy_document.export_job_trust.json
+  max_session_duration = 3600
+}
+
+data "aws_iam_policy_document" "export_job" {
+  statement {
+    sid       = "ReadTenantRaw"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.raw_ingest.arn}/$${aws:PrincipalTag/tenant_id}/*"]
+  }
+
+  statement {
+    sid       = "ListTenantRaw"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.raw_ingest.arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["$${aws:PrincipalTag/tenant_id}/*"]
+    }
+  }
+
+  statement {
+    sid       = "WriteTenantExports"
+    actions   = ["s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = ["${aws_s3_bucket.exports.arn}/$${aws:PrincipalTag/tenant_id}/*"]
+  }
+
+  # With S3 bucket keys the KMS encryption context is the bucket, not the
+  # object, so KMS can't be scoped per tenant; S3 statements above do that.
+  # Restrict the key to use through S3 only.
+  statement {
+    sid       = "CustomerDataKeyViaS3"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+    resources = [data.aws_kms_key.customer_data.arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${var.region}.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "export_job" {
+  name   = "export-job"
+  role   = aws_iam_role.export_job.id
+  policy = data.aws_iam_policy_document.export_job.json
 }
 
 resource "aws_iam_role_policy" "export_api" {

@@ -29,6 +29,8 @@ spec:
           command: ["python", "-m", "worker"]
           env:
             {{- include "export-service.env" . | nindent 12 }}
+            - name: EXPORT_JOB_ROLE_ARN
+              value: {{ required "worker.jobRoleArn is required" .Values.worker.jobRoleArn | quote }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:

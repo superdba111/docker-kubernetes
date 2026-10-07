@@ -30,6 +30,10 @@ serviceAccounts:
     name: export-worker
     roleArn: ""
 
+# Role the worker assumes per job, tagged with the job's tenant (review B4).
+worker:
+  jobRoleArn: ""
+
 env:
   AWS_REGION: us-gov-west-1
   # FIPS endpoints are resolved by the SDK; never override with a non-FIPS URL.
