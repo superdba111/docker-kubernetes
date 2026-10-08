@@ -1,0 +1,6 @@
+apiVersion: v2
+name: export-service
+description: Customer bulk data export (Parquet) with presigned downloads
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

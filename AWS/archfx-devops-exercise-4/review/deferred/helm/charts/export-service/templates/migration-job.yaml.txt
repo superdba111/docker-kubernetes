@@ -1,0 +1,119 @@
+{{- if .Values.migrations.enabled }}
+# Runs DB schema migrations only. It needs no Kubernetes API access, so the
+# ServiceAccount has no RoleBindings and no token is mounted.
+#
+# Seeding export-config ConfigMaps into tenant namespaces (previously done here
+# with cluster-admin) is removed. If it is still needed, it gets a dedicated,
+# security-reviewed design: a namespaced Role limited to the export-config
+# ConfigMap in each tenant namespace (boundary section 4).
+#
+# Network prerequisites are hooks too. On a fresh install, ordinary resources
+# (the api/worker NetworkPolicies and SecurityGroupPolicy) are only created
+# after pre-install hooks finish, so under namespace default-deny the Job
+# would have no DNS or RDS path. Hook order: ExternalSecret (-20), migrate
+# NetworkPolicy and SecurityGroupPolicy (-15), ServiceAccount (-10), Job (0).
+# They select only the migrate pod, so re-creating them on upgrade
+# (before-hook-creation) never touches running api/worker pods.
+{{- if not .Values.podSecurityGroup.groupIds }}
+{{- fail "podSecurityGroup.groupIds is required when migrations.enabled (RDS only admits the export-service security group)" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-15"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: export-service
+      app.kubernetes.io/component: migrate
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- include "export-service.dnsEgress" . | nindent 4 }}
+    {{- with .Values.networkPolicy.egressCidrs }}
+    - to:
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - port: 5432
+    {{- end }}
+---
+apiVersion: vpcresources.k8s.aws/v1beta1
+kind: SecurityGroupPolicy
+metadata:
+  name: {{ .Release.Name }}-migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-15"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: export-service
+      app.kubernetes.io/component: migrate
+  securityGroups:
+    groupIds:
+      {{- toYaml .Values.podSecurityGroup.groupIds | nindent 6 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-migrator
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: export-service
+        app.kubernetes.io/component: migrate
+    spec:
+      serviceAccountName: {{ .Release.Name }}-migrator
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ required "image.tag is required" .Values.image.tag }}"
+          command: ["python", "-m", "migrate"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            - name: DB_HOST
+              value: {{ .Values.database.host | quote }}
+            - name: DB_NAME
+              value: {{ .Values.database.name | quote }}
+            - name: DB_USER
+              value: {{ .Values.database.user | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: DB_PASSWORD
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

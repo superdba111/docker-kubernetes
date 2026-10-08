@@ -1,0 +1,2 @@
+serviceAccount:
+  roleArn: arn:aws-us-gov:iam::111122223333:role/govhigh-ingest-api

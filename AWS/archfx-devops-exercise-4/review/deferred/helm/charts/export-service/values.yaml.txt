@@ -1,0 +1,101 @@
+replicaCount: 2
+workerReplicaCount: 2
+
+# Feature flag. Empty = exports disabled for everyone and the worker scaled to
+# 0. Enable per tenant only after the worker code is reviewed with per-tenant
+# scoped access (review B4/G1).
+exports:
+  enabledTenants: []
+
+# How customers receive exports. "stream" goes through the portal, the only
+# approved internet-facing path. "presigned" (direct S3 download) needs the
+# ISSO's confirmation that it is covered by the SSP (review A4). The chart
+# refuses to render it without issoApprovalRef, but that is only a breadcrumb:
+# the control is the Platform/Security review required on helm/ (CODEOWNERS),
+# where the reviewer checks the referenced approval exists.
+download:
+  mode: stream
+  issoApprovalRef: ""
+
+image:
+  repository: 111122223333.dkr.ecr.us-gov-west-1.amazonaws.com/foundry/export-service
+  # Immutable tag set by CI (git SHA). Never "latest".
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Separate identities: the API must not hold the worker's raw-ingest access.
+serviceAccounts:
+  api:
+    name: export-api
+    roleArn: ""
+  worker:
+    name: export-worker
+    roleArn: ""
+
+# Role the worker assumes per job, tagged with the job's tenant (review B4).
+worker:
+  jobRoleArn: ""
+
+env:
+  AWS_REGION: us-gov-west-1
+  # FIPS endpoints are resolved by the SDK; never override with a non-FIPS URL.
+  AWS_USE_FIPS_ENDPOINT: "true"
+  EXPORT_BUCKET: foundry-govhigh-customer-exports
+  RAW_BUCKET: foundry-govhigh-raw-ingest
+  EXPORT_QUEUE_URL: ""
+  PRESIGNED_URL_TTL_SECONDS: "900"     # 15 min; portal re-issues on each click. Capped at 1h in code.
+  # Session JWT verification (required; the service refuses to start without these)
+  JWT_ISSUER: ""
+  JWT_AUDIENCE: export-service
+  JWT_JWKS_URL: ""
+  LOG_LEVEL: INFO
+  SENTRY_ENVIRONMENT: govhigh
+  SENTRY_TRACES_SAMPLE_RATE: "0.05"
+
+database:
+  host: ""
+  name: exports
+  user: export_svc
+
+# Pulled from AWS Secrets Manager by External Secrets Operator.
+externalSecret:
+  secretStoreRef: govhigh-secrets-manager
+  refreshInterval: 1h
+  keys:
+    SENTRY_DSN: govhigh/export-service/sentry-dsn    # self-hosted, sentry.govhigh.internal
+    DB_PASSWORD: govhigh/export-service/db-password  # rotate: the old value was committed
+
+migrations:
+  # Off until the migrate module is in the PR and reviewed (review G1).
+  enabled: false
+
+resources:
+  requests: { cpu: 500m, memory: 1Gi }
+  limits:   { memory: 4Gi }
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Security group for the export pods (Terraform output
+# export_service_security_group_id). Required before any tenant is enabled.
+podSecurityGroup:
+  groupIds: []
+
+networkPolicy:
+  ingressFromNamespaces: [ingress-nginx]
+  egressToNamespaces: [sentry]         # both components: in-boundary error tracking
+  apiEgressToNamespaces: [portal]      # api only: JWKS for session JWT verification
+  egressCidrs: [10.40.0.0/16]   # RDS (port 5432 only)
+  # Interface endpoint addresses for s3-fips, sqs and sts (Terraform output
+  # export_service_endpoint_cidrs). Required before any tenant is enabled.
+  awsEndpointCidrs: []

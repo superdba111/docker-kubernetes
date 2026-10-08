@@ -1,0 +1,19 @@
+# Last matching pattern wins.
+
+*                         @foundry/platform
+
+/terraform/               @foundry/platform @foundry/security-review
+/helm/                    @foundry/platform @foundry/security-review
+/.github/workflows/       @foundry/platform @foundry/security-review
+/docs/                    @foundry/security-review
+/CODEOWNERS               @foundry/security-review
+/review/deferred/         @foundry/platform @foundry/security-review
+**/Dockerfile             @foundry/platform @foundry/security-review
+
+/services/ingest-api/     @foundry/ingest @foundry/platform
+
+# Data Products — export feature. Last match wins, so the required reviewers
+# from the broader paths above are repeated here (security-review-policy.md 1).
+/services/export-service/                  @foundry/data-products @foundry/security-review
+/helm/charts/export-service/               @foundry/data-products @foundry/platform @foundry/security-review
+/.github/workflows/export-service.yml      @foundry/data-products @foundry/platform @foundry/security-review

@@ -1,0 +1,88 @@
+# Risk Acceptance / Exception Request
+
+**Scope after split:** deferred PR B only. PR A does not deploy the application
+or use DB TLS in production. This draft must not be read as approval to restore
+deployment assets or as a merge prerequisite for source-only PR A.
+
+**Status: DRAFT. Not approved.** Raised so the decision is explicit (review G6).
+No tenant is enabled while this is neither approved nor remediated.
+
+| Field                    | Value |
+|--------------------------|-------|
+| Exception ID             | RA-2026-015 |
+| Type                     | **OR** (Operational requirement) |
+| Finding(s)               | Review finding G6: `psycopg[binary]` (psycopg-binary 3.2.5) bundles its own `libpq`, `libssl` and `libcrypto`, so Postgres TLS doesn't use the hardened image's FIPS-validated OpenSSL. Components: `export-service` (api, worker, migrate); also `ingest-api` (same dependency) |
+| Original severity        | HIGH (boundary §3: FIPS-validated modules for data in transit) |
+| Adjusted severity (if RA)| n/a |
+| Environment(s)           | govhigh (`111122223333`, us-gov-west-1) |
+| Requested by             | Maxwell Li (Security Review), on behalf of Data Products and Ingest |
+| Expires                  | 2027-01-04 (≤ 90 days) |
+
+## Description
+The Postgres driver's binary wheel ships its own copy of OpenSSL. The TLS
+session between the service and RDS is therefore negotiated by that bundled
+OpenSSL, not by the FIPS-validated module in
+`hardened/python:3.12-fips`. The connection is still encrypted
+(`sslmode=require`), but the cryptographic module isn't the validated one, so
+§3 isn't met.
+
+## Justification / Evidence
+- **Evidence:**
+  - **Bundled libpq is what runs:** with `psycopg[binary]==3.2.5`,
+    `psycopg.pq.__impl__ == "binary"`.
+  - **Linux wheel contents** (the hash-locked manylinux wheel the image
+    installs): `psycopg_binary.libs/` contains libpq 17.4 (`PQlibVersion`
+    = 170004), `libssl.so.3` and `libcrypto.so.3` (OpenSSL 3.4.1). That's a
+    supported OpenSSL, but not the FIPS-validated module in the hardened image.
+  - **Version history:** the PR's pin, 3.1.18, bundled OpenSSL 1.1.1w
+    (end-of-life) and libpq 16.0.
+  - **Out of scope here:** the bundled libpq's CVE-2026-90011 exposure
+    (16.0 and 17.0 were affected) is a separate vulnerability, fixed by the
+    bump to 3.2.5 and checked by `tests/test_dependencies.py`. This exception
+    covers only the FIPS gap.
+  - **To attach before approval:** the same check run inside the built ECR image.
+- **Why it can't be fixed by this PR alone:** the fix is to use libpq linked
+  against the hardened image's OpenSSL, either with `psycopg` (pure Python,
+  loads system libpq) or by building `psycopg[c]`. Both need libpq in the
+  hardened base image, which Platform owns. Whether it's there isn't visible
+  from this repo.
+- **Why OR rather than FP:** the finding is real. This is a time-boxed
+  acceptance while Platform provides the dependency.
+
+**Reviewer's note:** if Platform can confirm libpq in the hardened image this
+week, remediate instead of accepting.
+
+## Compensating controls
+- **Path stays inside the VPC:** the connection to RDS runs from pod to RDS
+  inside the VPC, limited by the export SG to the exports RDS SG on 5432 (E3).
+  It never crosses a boundary or the internet.
+- **TLS required on both ends:** `sslmode=require` on the client.
+  **Condition:** Platform confirms `rds.force_ssl=1` on the exports cluster.
+- **Data at rest:** RDS and all export data are encrypted with the
+  customer-data CMK (FIPS-validated AWS KMS).
+- **Credentials:** the branch serves the DB password from Secrets Manager.
+  **Condition of approval:** it has been rotated since the git-history
+  exposure (review C2).
+- **Scope:** the DB holds job metadata (tenant ID, date range, status, S3 key),
+  not exported line data.
+
+## Remediation plan
+1. **Platform:** confirm or add libpq (linked to the image's FIPS OpenSSL) in
+   `hardened/python:3.12-fips`. Due 2026-11-06.
+2. **Data Products:** switch `requirements.in` from `psycopg[binary]` to
+   `psycopg` (or `psycopg[c]`). Add an image test that asserts
+   `psycopg.pq.__impl__ != "binary"`. Due 2 weeks after step 1.
+3. **Ingest team:** same change for `ingest-api`. Due 2 weeks after step 1.
+4. Close this exception when both images pass the new check.
+
+## POA&M lifecycle
+**Owner: Security Review. Status: not registered; draft only.** Before any
+production reliance, register RA-2026-015 on the POA&M with both approvals,
+image evidence, remediation owners and expiry; attach the entry reference
+here. Security Review tracks the remediation dates and expiry, and records
+closure evidence when both services meet the remediation plan. An expired or
+unapproved exception grants no permission to continue using the affected path.
+
+## Approvals
+- Security Reviewer:
+- Platform Engineering Manager:

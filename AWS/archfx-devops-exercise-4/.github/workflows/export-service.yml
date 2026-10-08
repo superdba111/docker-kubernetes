@@ -1,0 +1,29 @@
+name: export-service
+
+on:
+  pull_request:
+    paths: ["services/export-service/**", ".github/workflows/export-service.yml", "terraform/**", "helm/**", "review/deferred/**"]
+  push:
+    branches: [main]
+    paths: ["services/export-service/**", ".github/workflows/export-service.yml", "terraform/**", "helm/**", "review/deferred/**"]
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Verify foundation scope
+        run: python3 -m unittest discover -s services/export-service/tests -p test_delivery_scope.py
+
+      - name: Test
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes -r services/export-service/requirements-dev.txt
+          .venv/bin/pytest services/export-service

@@ -1,0 +1,19 @@
+serviceAccounts:
+  api:
+    roleArn: arn:aws-us-gov:iam::111122223333:role/govhigh-export-api
+  worker:
+    roleArn: arn:aws-us-gov:iam::111122223333:role/govhigh-export-worker
+
+worker:
+  jobRoleArn: arn:aws-us-gov:iam::111122223333:role/govhigh-export-job
+
+env:
+  EXPORT_QUEUE_URL: https://sqs.us-gov-west-1.amazonaws.com/111122223333/govhigh-export-jobs
+  # Issuer is the value in the portal's tokens. Keys are fetched in-cluster so
+  # the request stays inside the boundary and is allowed by the NetworkPolicy
+  # (egress to the portal namespace). TODO(portal team): confirm both values.
+  JWT_ISSUER: https://portal.foundry-gov.example
+  JWT_JWKS_URL: https://portal-auth.portal.svc.cluster.local/.well-known/jwks.json
+
+database:
+  host: exports.cluster-xxxx.us-gov-west-1.rds.amazonaws.com
